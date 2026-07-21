@@ -40,6 +40,7 @@ class ConversationState:
 
 
 ADDRESS_FALLBACK = "Точный адрес склада уточнит координатор после записи."
+WAREHOUSE_ADDRESS_MESSAGE = "Адрес склада: {address}"
 
 ADDRESS_BY_CITY = {
     "астрахань": "Астрахань, 1-й проезд Рождественского, с8",
@@ -142,8 +143,7 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
         state.city = normalize_city(city_hint) or state.city
         address = resolve_address(state.city)
         state.address = address
-        state.step = "awaiting_arrival"
-        return ADDRESS_MESSAGE
+        return WAREHOUSE_ADDRESS_MESSAGE.format(address=address)
 
     if state.step == "idle":
         state.step = "awaiting_interest"

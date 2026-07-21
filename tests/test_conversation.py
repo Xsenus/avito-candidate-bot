@@ -75,6 +75,23 @@ def test_unknown_city_does_not_expose_an_unrelated_spreadsheet():
     assert "docs.google.com" not in ADDRESS_FALLBACK
 
 
+def test_address_question_does_not_reset_candidate_progress():
+    state = ConversationState(
+        step="awaiting_phone",
+        city="Кемерово",
+        last_name="Травкин",
+        first_name="Виталий",
+        internship_date="23.07.2026",
+    )
+
+    reply = handle_user_message(state, "А где находится склад?")
+
+    assert "Терешковой" in reply
+    assert state.step == "awaiting_phone"
+    assert state.last_name == "Травкин"
+    assert state.internship_date == "23.07.2026"
+
+
 @pytest.mark.parametrize(
     "answer", ["Да, готов", "готова", "Конечно!", "хорошо, давайте"]
 )
