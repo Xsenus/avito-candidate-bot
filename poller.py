@@ -25,6 +25,7 @@ from avito_bot.conversation import (
     handle_user_message,
     schedule_delayed_message,
 )
+from avito_bot.candidate import normalize_phone, resolve_internship_date, split_full_name
 from avito_bot.storage import SQLiteStateStore
 from avito_bot.workflow import CandidateWorkflow, mark_invitation_sent
 from avito_bot.yandex_form import YandexFormSubmitter
@@ -176,6 +177,10 @@ def initialize_message_cursor(
 
             if inferred_step:
                 city, item_id = extract_chat_context(chat)
+                restore_collected_fields(
+                    state,
+                    messages[: (prompt_index or 0) + 1],
+                )
                 state.step = inferred_step
                 state.city = city or state.city
                 state.item_id = item_id or state.item_id
@@ -211,6 +216,55 @@ def infer_step_from_bot_message(text: str | None) -> str | None:
     if normalized == "И номер":
         return "awaiting_phone"
     return None
+
+
+def restore_collected_fields(
+    state: ConversationState, messages: list[dict[str, Any]]
+) -> None:
+    """Recover date, name and phone that the legacy in-memory bot already collected."""
+    expected_step = None
+    for message in oldest_first(messages):
+        content = message.get("content") or {}
+        text = content.get("text") if isinstance(content, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if message.get("direction") == "out":
+            expected_step = infer_step_from_bot_message(text)
+            continue
+        if message.get("direction") != "in" or message.get("type") != "text":
+            continue
+
+        if expected_step == "awaiting_datetime":
+            try:
+                created = message.get("created")
+                timestamp = float(created) if isinstance(created, (int, float)) else None
+                if timestamp and timestamp > 10_000_000_000:
+                    timestamp /= 1000
+                message_date = (
+                    datetime.fromtimestamp(timestamp, timezone.utc).date()
+                    if timestamp
+                    else None
+                )
+                internship_date = resolve_internship_date(text, today=message_date)
+                state.date_time = text.strip()
+                state.internship_date = internship_date.strftime("%d.%m.%Y")
+            except (ValueError, OSError, OverflowError):
+                pass
+        elif expected_step == "awaiting_full_name":
+            try:
+                state.last_name, state.first_name = split_full_name(text)
+                state.full_name = text.strip()
+            except ValueError:
+                pass
+            try:
+                state.phone = normalize_phone(text)
+            except ValueError:
+                pass
+        elif expected_step == "awaiting_phone":
+            try:
+                state.phone = normalize_phone(text)
+            except ValueError:
+                pass
 
 
 def process_chat_message(

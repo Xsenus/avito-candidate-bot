@@ -8,6 +8,7 @@ from poller import (
     initialize_message_cursor,
     iter_new_chat_messages,
     process_chat_message,
+    restore_collected_fields,
 )
 
 
@@ -144,6 +145,49 @@ def test_known_bot_prompts_map_to_expected_steps():
     assert infer_step_from_bot_message(ADDRESS_MESSAGE) == "awaiting_datetime"
     assert infer_step_from_bot_message("И номер") == "awaiting_phone"
     assert infer_step_from_bot_message("ручное сообщение") is None
+
+
+def test_legacy_history_restores_date_name_and_phone():
+    from avito_bot.conversation import ADDRESS_MESSAGE, CONFIRMATION_MESSAGE
+
+    state = ConversationState()
+    messages = [
+        {
+            "id": "day-prompt",
+            "created": 1784592000,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": ADDRESS_MESSAGE},
+        },
+        {
+            "id": "day-answer",
+            "created": 1784592060,
+            "direction": "in",
+            "type": "text",
+            "content": {"text": "четверг"},
+        },
+        {
+            "id": "name-prompt",
+            "created": 1784592120,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": CONFIRMATION_MESSAGE},
+        },
+        {
+            "id": "candidate-data",
+            "created": 1784592180,
+            "direction": "in",
+            "type": "text",
+            "content": {"text": "Травкин Виталий 8 927 206-97-01"},
+        },
+    ]
+
+    restore_collected_fields(state, messages)
+
+    assert state.internship_date
+    assert state.last_name == "Травкин"
+    assert state.first_name == "Виталий"
+    assert state.phone == "+79272069701"
 
 
 class FakeClient:
