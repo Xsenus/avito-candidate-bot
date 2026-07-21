@@ -29,7 +29,9 @@ load_dotenv()
 
 
 def iter_new_chat_messages(
-    chats: list[dict[str, Any]], store: SQLiteStateStore
+    client: AvitoClient,
+    chats: list[dict[str, Any]],
+    store: SQLiteStateStore,
 ) -> Iterator[tuple[str, ConversationState, dict[str, Any], str, str | None, str | None]]:
     for chat in chats:
         chat_id = str(chat.get("id") or "").strip()
@@ -37,21 +39,34 @@ def iter_new_chat_messages(
             continue
 
         last_message = chat.get("last_message") or {}
-        message_id = str(last_message.get("id") or "").strip()
-        if not message_id or store.is_processed(chat_id, message_id):
-            continue
-        if last_message.get("direction") != "in" or last_message.get("type") != "text":
-            store.mark_processed(chat_id, message_id)
-            continue
-
-        content = last_message.get("content") or {}
-        text = content.get("text") if isinstance(content, dict) else None
-        if not isinstance(text, str) or not text.strip():
-            store.mark_processed(chat_id, message_id)
+        last_message_id = str(last_message.get("id") or "").strip()
+        if not last_message_id or store.is_processed(chat_id, last_message_id):
             continue
 
         city, item_id = extract_chat_context(chat)
-        yield chat_id, store.load(chat_id), last_message, message_id, city, item_id
+        state = store.load(chat_id)
+        messages = client.get_messages(chat_id, limit=100)
+        for message in oldest_first(messages):
+            message_id = str(message.get("id") or "").strip()
+            if not message_id or store.is_processed(chat_id, message_id):
+                continue
+            if message.get("direction") != "in" or message.get("type") != "text":
+                store.mark_processed(chat_id, message_id)
+                continue
+
+            content = message.get("content") or {}
+            text = content.get("text") if isinstance(content, dict) else None
+            if not isinstance(text, str) or not text.strip():
+                store.mark_processed(chat_id, message_id)
+                continue
+            yield chat_id, state, message, message_id, city, item_id
+
+
+def oldest_first(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Avito returns newest first; use timestamps when available for stable ordering."""
+    if messages and all(isinstance(message.get("created"), (int, float)) for message in messages):
+        return sorted(messages, key=lambda message: (message["created"], str(message.get("id", ""))))
+    return list(reversed(messages))
 
 
 def extract_chat_context(chat: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -125,7 +140,8 @@ def schedule_retry(
 def initialize_message_cursor(
     client: AvitoClient, store: SQLiteStateStore, chats: list[dict[str, Any]]
 ) -> None:
-    if store.get_metadata("message_cursor_initialized") == "true":
+    cursor_key = "message_history_cursor_initialized_v2"
+    if store.get_metadata(cursor_key) == "true":
         return
     skip_existing = os.getenv("BOOTSTRAP_SKIP_EXISTING_MESSAGES", "true").lower() in {
         "1",
@@ -137,12 +153,15 @@ def initialize_message_cursor(
         count = 0
         for chat in chats:
             chat_id = str(chat.get("id") or "").strip()
-            message_id = str((chat.get("last_message") or {}).get("id") or "").strip()
-            if chat_id and message_id:
-                store.mark_processed(chat_id, message_id)
-                count += 1
-        print(f"Bootstrap: skipped {count} existing last messages")
-    store.set_metadata("message_cursor_initialized", "true")
+            if not chat_id:
+                continue
+            for message in client.get_messages(chat_id, limit=100):
+                message_id = str(message.get("id") or "").strip()
+                if message_id:
+                    store.mark_processed(chat_id, message_id)
+                    count += 1
+        print(f"Bootstrap: skipped {count} existing messages")
+    store.set_metadata(cursor_key, "true")
 
 
 def process_chat_message(
@@ -215,7 +234,7 @@ def main() -> None:
     while True:
         try:
             chats = client.get_chats(unread_only=False)
-            for values in iter_new_chat_messages(chats, store):
+            for values in iter_new_chat_messages(client, chats, store):
                 try:
                     process_chat_message(client, workflow, store, *values)
                 except Exception as exc:

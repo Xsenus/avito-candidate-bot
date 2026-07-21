@@ -1,6 +1,12 @@
 import pytest
 
-from avito_bot.conversation import ConversationState, handle_user_message, looks_like_datetime
+from avito_bot.conversation import (
+    ADDRESS_FALLBACK,
+    ConversationState,
+    handle_user_message,
+    looks_like_datetime,
+    resolve_address,
+)
 
 
 def test_candidate_answers_are_normalized(monkeypatch):
@@ -51,3 +57,8 @@ def test_full_name_and_phone_can_be_sent_in_one_message():
     assert state.phone == "+79272069701"
     assert state.step == "ready_to_submit"
     assert state.application_status == "pending"
+
+
+def test_unknown_city_does_not_expose_an_unrelated_spreadsheet():
+    assert resolve_address("Неизвестный город") == ADDRESS_FALLBACK
+    assert "docs.google.com" not in ADDRESS_FALLBACK

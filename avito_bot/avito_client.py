@@ -102,6 +102,30 @@ class AvitoClient:
         payload = response.json()
         return payload.get("chats", [])
 
+    def get_messages(
+        self, chat_id: str, *, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """Return recent chat messages in the order provided by Avito (newest first)."""
+        if not self.user_id:
+            raise RuntimeError("AVITO_USER_ID must be configured")
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            raise ValueError("Avito chat_id cannot be empty")
+
+        response = self._authorized_request(
+            "GET",
+            (
+                f"{self.base_url}/messenger/v3/accounts/{self.user_id}"
+                f"/chats/{normalized_chat_id}/messages/"
+            ),
+            params={"limit": max(1, min(int(limit), 100)), "offset": max(0, int(offset))},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        messages = payload.get("messages", [])
+        return messages if isinstance(messages, list) else []
+
     def _authorized_request(self, method: str, url: str, **kwargs):
         for attempt in range(2):
             token = self.get_access_token()

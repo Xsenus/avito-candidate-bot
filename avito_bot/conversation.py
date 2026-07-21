@@ -39,7 +39,7 @@ class ConversationState:
     next_retry_at: str | None = None
 
 
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1e33AjpbVxacoo-_TKW7U9B0-84qWMRypRPMlksuhZ64/edit?gid=0#gid=0"
+ADDRESS_FALLBACK = "Точный адрес склада уточнит координатор после записи."
 
 ADDRESS_BY_CITY = {
     "астрахань": "Астрахань, 1-й проезд Рождественского, с8",
@@ -167,7 +167,7 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
     if state.step == "awaiting_arrival":
         if is_positive(cleaned):
             state.step = "awaiting_datetime"
-            return STORE_SELECTION_MESSAGE.format(city=state.city or "Новороссийск", address=state.address or SHEET_URL)
+            return STORE_SELECTION_MESSAGE.format(city=state.city or "вашем городе", address=state.address or ADDRESS_FALLBACK)
         if looks_like_datetime(cleaned):
             state.date_time = text.strip()
             state.internship_date = resolve_internship_date(text).strftime("%d.%m.%Y")
@@ -320,7 +320,7 @@ def asks_for_address(text: str) -> bool:
 
 def resolve_address(city: str | None) -> str:
     if not city:
-        return SHEET_URL
+        return ADDRESS_FALLBACK
     lowered = city.strip().lower()
     aliases = {
         "спб": "санкт-петербург",
@@ -335,7 +335,7 @@ def resolve_address(city: str | None) -> str:
     for key, value in ADDRESS_BY_CITY.items():
         if key in normalized:
             return value
-    return SHEET_URL
+    return ADDRESS_FALLBACK
 
 
 def schedule_delayed_message(client: AvitoClient, chat_id: str, message: str, delay: int = 15) -> None:
