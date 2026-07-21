@@ -32,6 +32,8 @@ from avito_bot.yandex_form import YandexFormSubmitter
 
 load_dotenv()
 
+CHAT_PAGE_LIMIT = 100
+
 
 def iter_new_chat_messages(
     client: AvitoClient,
@@ -50,7 +52,18 @@ def iter_new_chat_messages(
 
         city, item_id = extract_chat_context(chat)
         state = store.load(chat_id)
-        messages = client.get_messages(chat_id, limit=100)
+        messages = client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT)
+
+        # An old dialog can appear in the unread feed for the first time after a
+        # candidate sends one new message. Its earlier, already-read history was
+        # never part of our startup page and must not be replayed. In that case
+        # establish a cursor at the current last message and process only it.
+        if not store.has_seen_chat(chat_id):
+            for historical in messages:
+                historical_id = str(historical.get("id") or "").strip()
+                if historical_id and historical_id != last_message_id:
+                    store.mark_processed(chat_id, historical_id)
+
         for message in oldest_first(messages):
             message_id = str(message.get("id") or "").strip()
             if not message_id or store.is_processed(chat_id, message_id):
@@ -194,19 +207,12 @@ def initialize_message_cursor(
                 state.item_id = item_id or state.item_id
                 store.save(chat_id, state)
 
-            for index, message in enumerate(messages):
+            for message in messages:
                 message_id = str(message.get("id") or "").strip()
                 if not message_id:
                     continue
-                is_new_candidate_reply = (
-                    prompt_index is not None
-                    and index > prompt_index
-                    and message.get("direction") == "in"
-                    and message.get("type") == "text"
-                )
-                if not is_new_candidate_reply:
-                    store.mark_processed(chat_id, message_id)
-                    count += 1
+                store.mark_processed(chat_id, message_id)
+                count += 1
         print(f"Bootstrap: skipped {count} existing messages")
     store.set_metadata(cursor_key, "true")
 
@@ -400,7 +406,9 @@ def main() -> None:
 
 
     try:
-        initial_chats = client.get_chats(unread_only=False)
+        initial_chats = client.get_chats(
+            unread_only=False, limit=CHAT_PAGE_LIMIT
+        )
         initialize_message_cursor(client, store, initial_chats)
         repaired, returned = reconcile_incomplete_applications(client, store)
         if repaired or returned:
@@ -414,7 +422,9 @@ def main() -> None:
 
     while True:
         try:
-            chats = client.get_chats(unread_only=False)
+            chats = client.get_chats(
+                unread_only=True, limit=CHAT_PAGE_LIMIT
+            )
             for values in iter_new_chat_messages(client, chats, store):
                 try:
                     process_chat_message(client, workflow, store, *values)

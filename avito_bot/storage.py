@@ -80,6 +80,20 @@ class SQLiteStateStore:
             ).fetchone()
         return row is not None
 
+    def has_seen_chat(self, chat_id: str) -> bool:
+        """Return whether state or a message cursor already exists for this chat."""
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT 1 FROM conversations WHERE chat_id = ?
+                UNION ALL
+                SELECT 1 FROM processed_messages WHERE chat_id = ?
+                LIMIT 1
+                """,
+                (chat_id, chat_id),
+            ).fetchone()
+        return row is not None
+
     def mark_processed(self, chat_id: str, message_id: str) -> None:
         with self._lock:
             self._connection.execute(

@@ -107,7 +107,7 @@ def test_history_bootstrap_marks_every_recent_message(tmp_path):
     store.close()
 
 
-def test_history_bootstrap_restores_prompt_and_keeps_later_reply(tmp_path):
+def test_history_bootstrap_restores_prompt_and_marks_later_reply_read(tmp_path):
     from avito_bot.conversation import CONFIRMATION_MESSAGE
 
     store = SQLiteStateStore(tmp_path / "migration.sqlite3")
@@ -135,7 +135,46 @@ def test_history_bootstrap_restores_prompt_and_keeps_later_reply(tmp_path):
     assert restored.step == "awaiting_full_name"
     assert restored.city == "Кемерово"
     assert store.is_processed("chat-1", "bot-prompt")
-    assert not store.is_processed("chat-1", "candidate-name")
+    assert store.is_processed("chat-1", "candidate-name")
+    store.close()
+
+
+def test_first_seen_old_chat_processes_only_current_unread_message(tmp_path):
+    store = SQLiteStateStore(tmp_path / "first-seen.sqlite3")
+    messages = [
+        {
+            "id": "current-unread",
+            "created": 300,
+            "direction": "in",
+            "type": "text",
+            "content": {"text": "Здравствуйте"},
+        },
+        {
+            "id": "old-candidate-message",
+            "created": 200,
+            "direction": "in",
+            "type": "text",
+            "content": {"text": "Работа только"},
+        },
+        {
+            "id": "old-bot-message",
+            "created": 100,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": "Старый ответ"},
+        },
+    ]
+    candidate_chat = chat()
+    candidate_chat["last_message"] = messages[0]
+
+    yielded = list(
+        iter_new_chat_messages(FakeHistoryClient(messages), [candidate_chat], store)
+    )
+
+    assert [values[3] for values in yielded] == ["current-unread"]
+    assert store.is_processed("chat-1", "old-candidate-message")
+    assert store.is_processed("chat-1", "old-bot-message")
+    assert not store.is_processed("chat-1", "current-unread")
     store.close()
 
 
