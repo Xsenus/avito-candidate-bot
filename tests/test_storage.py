@@ -40,3 +40,15 @@ def test_interrupted_submission_is_quarantined_without_retry(tmp_path):
     assert store.pending() == []
     assert store.quarantine_interrupted_submissions() == 0
     store.close()
+
+
+def test_all_conversations_returns_persisted_states(tmp_path):
+    store = SQLiteStateStore(tmp_path / "all.sqlite3")
+    store.save("chat-1", ConversationState(step="awaiting_phone"))
+    store.save("chat-2", ConversationState(step="done", application_status="completed"))
+
+    conversations = dict(store.all_conversations())
+
+    assert conversations["chat-1"].step == "awaiting_phone"
+    assert conversations["chat-2"].application_status == "completed"
+    store.close()

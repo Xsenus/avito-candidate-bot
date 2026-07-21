@@ -8,6 +8,7 @@ from poller import (
     initialize_message_cursor,
     iter_new_chat_messages,
     process_chat_message,
+    reconcile_incomplete_applications,
     restore_collected_fields,
 )
 
@@ -188,6 +189,58 @@ def test_legacy_history_restores_date_name_and_phone():
     assert state.last_name == "Травкин"
     assert state.first_name == "Виталий"
     assert state.phone == "+79272069701"
+
+
+def test_incomplete_pending_application_is_repaired_from_history(tmp_path):
+    from avito_bot.conversation import ADDRESS_MESSAGE, CONFIRMATION_MESSAGE
+
+    store = SQLiteStateStore(tmp_path / "reconcile.sqlite3")
+    store.save(
+        "chat-1",
+        ConversationState(
+            city="Кемерово",
+            application_status="pending",
+            phone="+79272069701",
+        ),
+    )
+    messages = [
+        {
+            "created": 1784592000,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": ADDRESS_MESSAGE},
+        },
+        {
+            "created": 1784592060,
+            "direction": "in",
+            "type": "text",
+            "content": {"text": "четверг"},
+        },
+        {
+            "created": 1784592120,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": CONFIRMATION_MESSAGE},
+        },
+        {
+            "created": 1784592180,
+            "direction": "in",
+            "type": "text",
+            "content": {"text": "Травкин Виталий"},
+        },
+    ]
+
+    repaired, returned = reconcile_incomplete_applications(
+        FakeHistoryClient(messages), store
+    )
+
+    restored = store.load("chat-1")
+    assert (repaired, returned) == (1, 0)
+    assert restored.application_status == "pending"
+    assert restored.internship_date
+    assert restored.last_name == "Травкин"
+    assert restored.first_name == "Виталий"
+    store.close()
 
 
 class FakeClient:

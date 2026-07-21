@@ -95,6 +95,14 @@ def complete_pending_application(
     chat_id: str,
     state: ConversationState,
 ) -> bool:
+    missing = missing_application_fields(state)
+    if missing and state.application_status != "submitted":
+        return_to_collection(store, chat_id, state, missing)
+        print(
+            f"application deferred chat_id={chat_id}: missing {', '.join(missing)}"
+        )
+        return False
+
     if not state.processing_notice_sent:
         client.send_message(
             chat_id,
@@ -218,6 +226,64 @@ def infer_step_from_bot_message(text: str | None) -> str | None:
     return None
 
 
+def missing_application_fields(state: ConversationState) -> list[str]:
+    return [
+        name
+        for name, value in (
+            ("internship_date", state.internship_date),
+            ("last_name", state.last_name),
+            ("first_name", state.first_name),
+            ("phone", state.phone),
+        )
+        if not value
+    ]
+
+
+def return_to_collection(
+    store: SQLiteStateStore,
+    chat_id: str,
+    state: ConversationState,
+    missing: list[str] | None = None,
+) -> None:
+    absent = missing or missing_application_fields(state)
+    state.application_status = "collecting"
+    if "internship_date" in absent:
+        state.step = "awaiting_datetime"
+    elif "last_name" in absent or "first_name" in absent:
+        state.step = "awaiting_full_name"
+    elif "phone" in absent:
+        state.step = "awaiting_phone"
+    state.last_error = None
+    state.next_retry_at = None
+    state.submission_attempts = 0
+    store.save(chat_id, state)
+
+
+def reconcile_incomplete_applications(
+    client: AvitoClient, store: SQLiteStateStore
+) -> tuple[int, int]:
+    repaired = 0
+    returned_to_collection = 0
+    for chat_id, state in store.all_conversations():
+        if state.application_status not in {"pending", "submitted"}:
+            continue
+        missing = missing_application_fields(state)
+        if not missing:
+            continue
+        restore_collected_fields(state, client.get_messages(chat_id, limit=100))
+        missing = missing_application_fields(state)
+        if not missing:
+            state.last_error = None
+            state.next_retry_at = None
+            state.submission_attempts = 0
+            store.save(chat_id, state)
+            repaired += 1
+            continue
+        return_to_collection(store, chat_id, state, missing)
+        returned_to_collection += 1
+    return repaired, returned_to_collection
+
+
 def restore_collected_fields(
     state: ConversationState, messages: list[dict[str, Any]]
 ) -> None:
@@ -336,6 +402,12 @@ def main() -> None:
     try:
         initial_chats = client.get_chats(unread_only=False)
         initialize_message_cursor(client, store, initial_chats)
+        repaired, returned = reconcile_incomplete_applications(client, store)
+        if repaired or returned:
+            print(
+                f"Reconciled legacy applications: repaired={repaired}, "
+                f"returned_to_collection={returned}"
+            )
     except Exception as exc:
         print(f"Failed to initialize message cursor: {exc}")
         return

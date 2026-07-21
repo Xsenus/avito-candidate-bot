@@ -107,6 +107,26 @@ class SQLiteStateStore:
                 result.append((chat_id, state))
         return result
 
+    def all_conversations(self) -> list[tuple[str, ConversationState]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT chat_id, state_json FROM conversations"
+            ).fetchall()
+        allowed = {item.name for item in fields(ConversationState)}
+        return [
+            (
+                chat_id,
+                ConversationState(
+                    **{
+                        key: value
+                        for key, value in json.loads(raw).items()
+                        if key in allowed
+                    }
+                ),
+            )
+            for chat_id, raw in rows
+        ]
+
     def quarantine_interrupted_submissions(self) -> int:
         """Prevent an automatic duplicate after a crash during form submission."""
         with self._lock:
