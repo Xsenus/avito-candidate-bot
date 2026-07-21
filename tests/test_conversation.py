@@ -38,3 +38,16 @@ def test_invalid_phone_does_not_finish_conversation():
 @pytest.mark.parametrize("raw", ["четверг", "в четверг", "четвер", "чт"])
 def test_conversation_recognizes_weekday_variants(raw):
     assert looks_like_datetime(raw)
+
+
+def test_full_name_and_phone_can_be_sent_in_one_message():
+    state = ConversationState(step="awaiting_full_name")
+
+    reply = handle_user_message(state, "Травкин Виталий 8 (927) 206-97-01")
+
+    assert reply == ""
+    assert state.last_name == "Травкин"
+    assert state.first_name == "Виталий"
+    assert state.phone == "+79272069701"
+    assert state.step == "ready_to_submit"
+    assert state.application_status == "pending"

@@ -190,6 +190,14 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
         except ValueError as exc:
             return str(exc)
         state.full_name = text.strip()
+        try:
+            state.phone = normalize_phone(text)
+        except ValueError:
+            state.phone = None
+        if state.phone:
+            state.step = "ready_to_submit"
+            state.application_status = "pending"
+            return ""
         state.step = "awaiting_phone"
         return "И номер"
 
