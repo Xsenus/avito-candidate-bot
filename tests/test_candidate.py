@@ -50,9 +50,9 @@ def test_resolve_thursday_variants_from_screenshot(raw):
     assert resolve_internship_date(raw, today=tuesday) == date(2026, 7, 23)
 
 
-def test_resolve_same_weekday_to_today():
+def test_resolve_same_weekday_to_next_week_because_morning_start_has_passed():
     thursday = date(2026, 7, 23)
-    assert resolve_internship_date("четверг", today=thursday) == thursday
+    assert resolve_internship_date("четверг", today=thursday) == date(2026, 7, 30)
 
 
 def test_resolve_relative_date():
@@ -61,4 +61,9 @@ def test_resolve_relative_date():
 
 
 def test_resolve_explicit_date():
-    assert resolve_internship_date("25.07.2026") == date(2026, 7, 25)
+    assert resolve_internship_date("25.07.2026", today=date(2026, 7, 21)) == date(2026, 7, 25)
+
+
+def test_past_explicit_date_is_rejected():
+    with pytest.raises(ValueError):
+        resolve_internship_date("20.07.2026", today=date(2026, 7, 21))

@@ -27,6 +27,7 @@ fi
 source venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python -m playwright install --with-deps chromium
 
 if [ ! -f .env ]; then
   cp .env.example .env 2>/dev/null || true
@@ -50,7 +51,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME"
+systemctl enable "$SERVICE_NAME"
+systemctl restart "$SERVICE_NAME"
 systemctl status "$SERVICE_NAME" --no-pager || true
 
 echo "Bot installed and started as systemd service: $SERVICE_NAME"

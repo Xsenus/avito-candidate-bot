@@ -56,13 +56,18 @@ def resolve_internship_date(value: str, *, today: date | None = None) -> date:
     for weekday, patterns in WEEKDAY_PATTERNS.items():
         if any(re.search(rf"\b(?:{pattern})\b", cleaned) for pattern in patterns):
             days_ahead = (weekday - base.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
             return base + timedelta(days=days_ahead)
 
     for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y"):
         try:
-            return date.fromisoformat(
+            parsed = date.fromisoformat(
                 "-".join(reversed(re.split(r"[./-]", cleaned)))
             ) if fmt == "%d.%m.%Y" else _parse_date(cleaned, fmt)
+            if parsed < base:
+                raise ValueError("Указанная дата уже прошла")
+            return parsed
         except ValueError:
             continue
 

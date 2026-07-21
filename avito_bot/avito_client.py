@@ -65,11 +65,16 @@ class AvitoClient:
         if not self.client_id or not self.client_secret:
             raise RuntimeError("AVITO_CLIENT_ID and AVITO_CLIENT_SECRET must be configured")
 
-        token = self.get_access_token()
+        if not self.user_id:
+            raise RuntimeError("AVITO_USER_ID must be configured")
+        if not (text or "").strip():
+            raise ValueError("Avito message cannot be empty")
+        if len(text) > 1000:
+            raise ValueError("Avito message exceeds 1000 characters")
         url = f"{self.base_url}/messenger/v1/accounts/{self.user_id}/chats/{chat_id}/messages"
-        response = requests.post(
+        response = self._authorized_request(
+            "POST",
             url,
-            headers={"Authorization": f"Bearer {token}"},
             json={"type": "text", "message": {"text": text}},
             timeout=30,
         )
@@ -77,10 +82,9 @@ class AvitoClient:
         return response.json()
 
     def register_webhook(self, url: str) -> dict[str, Any]:
-        token = self.get_access_token()
-        response = requests.post(
+        response = self._authorized_request(
+            "POST",
             f"{self.base_url}/messenger/v3/webhook",
-            headers={"Authorization": f"Bearer {token}"},
             json={"url": url},
             timeout=30,
         )
@@ -88,10 +92,9 @@ class AvitoClient:
         return response.json()
 
     def get_chats(self, unread_only: bool = True, limit: int = 50) -> list[dict[str, Any]]:
-        token = self.get_access_token()
-        response = requests.get(
+        response = self._authorized_request(
+            "GET",
             f"{self.base_url}/messenger/v2/accounts/{self.user_id}/chats",
-            headers={"Authorization": f"Bearer {token}"},
             params={"unread_only": str(unread_only).lower(), "limit": limit},
             timeout=30,
         )
@@ -99,7 +102,13 @@ class AvitoClient:
         payload = response.json()
         return payload.get("chats", [])
 
-    def submit_to_yandex_form(self, form_url: str, data: dict[str, str]) -> dict[str, Any]:
-        response = requests.post(form_url, data=data, timeout=30)
-        response.raise_for_status()
-        return {"status": response.status_code, "url": form_url}
+    def _authorized_request(self, method: str, url: str, **kwargs):
+        for attempt in range(2):
+            token = self.get_access_token()
+            headers = dict(kwargs.pop("headers", {}))
+            headers["Authorization"] = f"Bearer {token}"
+            response = requests.request(method, url, headers=headers, **kwargs)
+            if response.status_code != 401 or attempt == 1:
+                return response
+            self._access_token = None
+        raise RuntimeError("Avito request retry failed")

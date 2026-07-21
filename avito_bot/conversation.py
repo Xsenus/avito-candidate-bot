@@ -19,6 +19,8 @@ class ConversationState:
     first_name: str | None = None
     phone: str | None = None
     city: str | None = None
+    item_id: str | None = None
+    service_center: str | None = None
     address: str | None = None
     date_time: str | None = None
     internship_date: str | None = None
@@ -30,6 +32,11 @@ class ConversationState:
     )
     notes: dict[str, str] = field(default_factory=dict)
     resume_step: str | None = None
+    application_status: str = "collecting"
+    processing_notice_sent: bool = False
+    last_error: str | None = None
+    submission_attempts: int = 0
+    next_retry_at: str | None = None
 
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1e33AjpbVxacoo-_TKW7U9B0-84qWMRypRPMlksuhZ64/edit?gid=0#gid=0"
@@ -191,8 +198,9 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
             state.phone = normalize_phone(text)
         except ValueError as exc:
             return str(exc)
-        state.step = "done"
-        return "Готово, вы записаны! Я пришлю вам адрес сюда в чат в течении 30 минут"
+        state.step = "ready_to_submit"
+        state.application_status = "pending"
+        return ""
 
     return ""
 
@@ -205,12 +213,6 @@ def handle_webhook_event(client: AvitoClient, state: ConversationState, payload:
     chat_id = _extract_chat_id(payload)
     city_hint = _extract_city(payload)
     reply = handle_user_message(state, message_text, client=client, chat_id=chat_id, city_hint=city_hint)
-
-    if state.step == "done" and state.full_name and state.phone:
-        try:
-            submit_form(state)
-        except Exception:
-            pass
 
     if not reply:
         return {"status": "ignored", "chat_id": chat_id}
@@ -225,31 +227,6 @@ def handle_webhook_event(client: AvitoClient, state: ConversationState, payload:
         schedule_delayed_message(client, chat_id, reply, delay=2)
 
     return {"status": "processed", "reply": reply, "chat_id": chat_id}
-
-
-def submit_form(state: ConversationState) -> None:
-    form_url = os.getenv("YANDEX_FORM_URL", "")
-    if not form_url:
-        return
-
-    data = {
-        "city": state.city or "",
-        "surname": state.last_name or "",
-        "name": state.first_name or "",
-        "phone": state.phone or "",
-        "date_time": state.internship_date or "",
-        "tariff": state.tariff,
-        "citizenship": state.citizenship,
-        "address": state.address or "",
-        "consent": "on",
-    }
-
-    try:
-        from .avito_client import AvitoClient
-        client = AvitoClient(client_id=os.getenv("AVITO_CLIENT_ID", ""), client_secret=os.getenv("AVITO_CLIENT_SECRET", ""), user_id=os.getenv("AVITO_USER_ID", ""), base_url=os.getenv("AVITO_BASE_URL", "https://api.avito.ru"))
-        client.submit_to_yandex_form(form_url, data)
-    except Exception:
-        pass
 
 
 def _extract_message_text(payload: dict[str, Any]) -> str | None:

@@ -15,7 +15,8 @@ def test_candidate_answers_are_normalized(monkeypatch):
     handle_user_message(state, "Иванов Иван Иванович")
     handle_user_message(state, "8 991 641-03-99")
 
-    assert state.step == "done"
+    assert state.step == "ready_to_submit"
+    assert state.application_status == "pending"
     assert state.last_name == "Иванов"
     assert state.first_name == "Иван"
     assert state.phone == "+79916410399"
