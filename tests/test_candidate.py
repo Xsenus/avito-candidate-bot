@@ -20,7 +20,7 @@ def test_split_full_name_requires_two_parts():
 
 @pytest.mark.parametrize("raw", ["Иван 89272069701", "89272069701 Иван", "Иванов 123"])
 def test_split_full_name_does_not_accept_phone_as_a_name(raw):
-    with pytest.raises(ValueError, match="должны содержать буквы"):
+    with pytest.raises(ValueError):
         split_full_name(raw)
 
 
@@ -28,6 +28,19 @@ def test_split_full_name_accepts_hyphen_and_apostrophe():
     assert split_full_name("Салтыков-Щедрин Жан'Поль") == (
         "Салтыков-Щедрин",
         "Жан'Поль",
+    )
+
+
+@pytest.mark.parametrize("raw", ["Работа только", "работа только", "иванов иван"])
+def test_split_full_name_rejects_regular_conversation_text(raw):
+    with pytest.raises(ValueError):
+        split_full_name(raw)
+
+
+def test_split_full_name_removes_phone_before_counting_name_parts():
+    assert split_full_name("Иванов Иван Иванович +7 999 000-00-00") == (
+        "Иванов",
+        "Иван",
     )
 
 

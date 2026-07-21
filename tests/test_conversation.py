@@ -65,7 +65,7 @@ def test_first_name_and_phone_are_not_submitted_as_full_name():
 
     reply = handle_user_message(state, "Виталий 8 (927) 206-97-01")
 
-    assert "фамилия" in reply.lower()
+    assert "фамил" in reply.lower()
     assert state.step == "awaiting_full_name"
     assert state.application_status == "collecting"
 

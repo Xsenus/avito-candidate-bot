@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from .candidate import normalize_phone, split_full_name
+
 
 class FormConfigurationError(RuntimeError):
     pass
@@ -47,6 +49,17 @@ class CandidateApplication:
         ]
         if missing:
             raise ValueError(f"Не заполнены поля заявки: {', '.join(missing)}")
+        split_full_name(f"{self.last_name} {self.first_name}")
+        if normalize_phone(self.phone) != self.phone:
+            raise ValueError("Телефон заявки должен иметь формат +7XXXXXXXXXX")
+        if self.tariff != "Драйв":
+            raise ValueError("Тариф заявки должен быть «Драйв»")
+        if self.citizenship != "Российская Федерация":
+            raise ValueError("Гражданство заявки должно быть «Российская Федерация»")
+        try:
+            datetime.strptime(self.internship_date, "%d.%m.%Y")
+        except ValueError as exc:
+            raise ValueError("Дата заявки должна иметь формат ДД.ММ.ГГГГ") from exc
 
 
 class YandexFormSubmitter:

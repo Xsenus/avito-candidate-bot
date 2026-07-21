@@ -14,28 +14,52 @@ WEEKDAY_PATTERNS = {
     6: (r"воскресень(?:е|я|ю|и)", r"вс"),
 }
 
+PHONE_CANDIDATE_RE = re.compile(
+    r"(?<!\d)(?:\+?7|8)?(?:[\s().-]*\d){10}(?![\s().-]*\d)"
+)
+NAME_PART_RE = re.compile(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'’-]*$")
+NON_NAME_WORDS = {
+    "работа",
+    "только",
+    "готов",
+    "готова",
+    "номер",
+    "телефон",
+    "стажировка",
+    "сегодня",
+    "завтра",
+}
+
 
 def split_full_name(value: str) -> tuple[str, str]:
     """Return surname and first name from the candidate's answer."""
+    raw = (value or "").strip()
+    phone_matches = list(PHONE_CANDIDATE_RE.finditer(raw))
+    if len(phone_matches) == 1:
+        match = phone_matches[0]
+        raw = raw[: match.start()] + " " + raw[match.end() :]
     parts = [
         part.strip(",.;:")
-        for part in re.split(r"\s+", (value or "").strip())
+        for part in re.split(r"\s+", raw)
         if part.strip(",.;:")
     ]
     if len(parts) < 2:
         raise ValueError("Укажите фамилию и имя через пробел")
-    name_pattern = re.compile(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'’-]*$")
-    if not name_pattern.fullmatch(parts[0]) or not name_pattern.fullmatch(parts[1]):
+    if len(parts) > 3:
+        raise ValueError("Укажите только фамилию, имя и при желании отчество")
+    if any(not NAME_PART_RE.fullmatch(part) for part in parts):
         raise ValueError("Фамилия и имя должны содержать буквы, без номера телефона")
+    if any(part.casefold() in NON_NAME_WORDS for part in parts):
+        raise ValueError("Не удалось распознать ФИО. Напишите, например: Иванов Иван")
+    if any(not part[0].isupper() for part in parts):
+        raise ValueError("Напишите фамилию и имя с заглавной буквы, например: Иванов Иван")
     return parts[0], parts[1]
 
 
 def normalize_phone(value: str) -> str:
     """Normalize a Russian phone number to +7XXXXXXXXXX."""
     raw = (value or "").strip()
-    candidates = re.findall(
-        r"(?<!\d)(?:\+?7|8)?(?:[\s().-]*\d){10}(?![\s().-]*\d)", raw
-    )
+    candidates = PHONE_CANDIDATE_RE.findall(raw)
     digits = re.sub(r"\D", "", candidates[0] if len(candidates) == 1 else raw)
     if len(digits) == 11 and digits[0] in {"7", "8"}:
         digits = "7" + digits[1:]

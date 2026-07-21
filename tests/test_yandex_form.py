@@ -28,6 +28,18 @@ def test_application_requires_every_form_field():
         application(phone="").validate()
 
 
+def test_application_rejects_conversation_words_in_name_fields():
+    with pytest.raises(ValueError, match="распознать ФИО"):
+        application(last_name="Работа", first_name="только").validate()
+
+
+def test_application_enforces_fixed_tariff_and_citizenship():
+    with pytest.raises(ValueError, match="Драйв"):
+        application(tariff="Другой").validate()
+    with pytest.raises(ValueError, match="Российская Федерация"):
+        application(citizenship="Другое").validate()
+
+
 def test_form_url_is_required_before_browser_is_started():
     with pytest.raises(FormConfigurationError, match="YANDEX_FORM_URL"):
         YandexFormSubmitter("").submit(application())
