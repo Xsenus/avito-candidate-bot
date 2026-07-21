@@ -4,14 +4,14 @@ import re
 from datetime import date, timedelta
 
 
-WEEKDAYS = {
-    "понедельник": 0,
-    "вторник": 1,
-    "среда": 2,
-    "четверг": 3,
-    "пятница": 4,
-    "суббота": 5,
-    "воскресенье": 6,
+WEEKDAY_PATTERNS = {
+    0: (r"понедельник(?:а|е)?", r"пн"),
+    1: (r"вторник(?:а|е)?", r"вт"),
+    2: (r"сред(?:а|у|ы|е)", r"ср"),
+    3: (r"четверг(?:а|е)?", r"четвер", r"чт"),
+    4: (r"пятниц(?:а|у|ы|е)", r"пт"),
+    5: (r"суббот(?:а|у|ы|е)", r"сб"),
+    6: (r"воскресень(?:е|я|ю|и)", r"вс"),
 }
 
 
@@ -25,7 +25,11 @@ def split_full_name(value: str) -> tuple[str, str]:
 
 def normalize_phone(value: str) -> str:
     """Normalize a Russian phone number to +7XXXXXXXXXX."""
-    digits = re.sub(r"\D", "", value or "")
+    raw = (value or "").strip()
+    candidates = re.findall(
+        r"(?<!\d)(?:\+?7|8)?(?:[\s().-]*\d){10}(?![\s().-]*\d)", raw
+    )
+    digits = re.sub(r"\D", "", candidates[0] if len(candidates) == 1 else raw)
     if len(digits) == 11 and digits[0] in {"7", "8"}:
         digits = "7" + digits[1:]
     elif len(digits) == 10:
@@ -36,9 +40,10 @@ def normalize_phone(value: str) -> str:
 
 
 def resolve_internship_date(value: str, *, today: date | None = None) -> date:
-    """Resolve a Russian relative day or weekday to the nearest future date."""
+    """Resolve a Russian relative day or weekday to its nearest occurrence."""
     base = today or date.today()
-    cleaned = re.sub(r"[^а-яё0-9.\-/\s]", "", (value or "").strip().lower())
+    cleaned = (value or "").strip().lower().replace("ё", "е")
+    cleaned = re.sub(r"[^а-я0-9.\-/\s]", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
     if "послезавтра" in cleaned:
@@ -48,8 +53,8 @@ def resolve_internship_date(value: str, *, today: date | None = None) -> date:
     if "сегодня" in cleaned:
         return base
 
-    for word, weekday in WEEKDAYS.items():
-        if word in cleaned:
+    for weekday, patterns in WEEKDAY_PATTERNS.items():
+        if any(re.search(rf"\b(?:{pattern})\b", cleaned) for pattern in patterns):
             days_ahead = (weekday - base.weekday()) % 7
             return base + timedelta(days=days_ahead)
 

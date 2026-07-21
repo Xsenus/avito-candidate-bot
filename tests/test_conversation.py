@@ -1,4 +1,6 @@
-from avito_bot.conversation import ConversationState, handle_user_message
+import pytest
+
+from avito_bot.conversation import ConversationState, handle_user_message, looks_like_datetime
 
 
 def test_candidate_answers_are_normalized(monkeypatch):
@@ -30,3 +32,8 @@ def test_invalid_phone_does_not_finish_conversation():
     assert state.step == "awaiting_phone"
     assert state.phone is None
     assert "номер" in reply.lower()
+
+
+@pytest.mark.parametrize("raw", ["четверг", "в четверг", "четвер", "чт"])
+def test_conversation_recognizes_weekday_variants(raw):
+    assert looks_like_datetime(raw)

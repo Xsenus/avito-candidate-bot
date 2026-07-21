@@ -312,29 +312,11 @@ def is_positive(text: str) -> bool:
 
 
 def looks_like_datetime(text: str) -> bool:
-    cleaned = re.sub(r"[^\w\s]", "", (text or "").strip().lower())
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    if not cleaned:
-        return False
-
-    day_words = {
-        "сегодня",
-        "завтра",
-        "послезавтра",
-        "понедельник",
-        "вторник",
-        "среда",
-        "четверг",
-        "пятница",
-        "суббота",
-        "воскресенье",
-        "буду",
-        "будущее",
-    }
-    if cleaned in day_words or any(word in cleaned for word in day_words):
+    try:
+        resolve_internship_date(text)
         return True
-
-    return bool(re.search(r"\b\d{1,2}(?:[./-]\d{1,2}(?:[./-]\d{2,4})?|:\d{1,2})?\b", cleaned))
+    except ValueError:
+        return False
 
 
 def normalize_city(city_hint: str | None) -> str | None:
