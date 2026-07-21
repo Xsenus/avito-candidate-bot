@@ -1,0 +1,71 @@
+from datetime import date
+
+import pytest
+
+from avito_bot.invitations import (
+    GoogleSheetInvitationSource,
+    InvitationCatalog,
+)
+
+
+SAMPLE_CSV = '''"",""
+"СЦ","Текст сообщения"
+"Новосибирск","Вы записаны на стажировку ДАТА по адресу склада"
+"СЦ Бутово","Приходите ДАТА в 8:00"
+'''
+
+
+class FakeResponse:
+    text = SAMPLE_CSV
+
+    def raise_for_status(self):
+        return None
+
+
+class FakeHttp:
+    def __init__(self):
+        self.calls = []
+
+    def get(self, url, *, timeout):
+        self.calls.append((url, timeout))
+        return FakeResponse()
+
+
+def test_catalog_parses_sheet_and_matches_sc_prefix():
+    catalog = InvitationCatalog.from_csv(SAMPLE_CSV)
+
+    assert len(catalog) == 2
+    assert catalog.find("СЦ Новосибирск").service_center == "Новосибирск"
+    assert catalog.find("Бутово").service_center == "СЦ Бутово"
+
+
+def test_invitation_replaces_date_marker():
+    template = InvitationCatalog.from_csv(SAMPLE_CSV).find("Новосибирск")
+
+    invitation = template.render(date(2026, 7, 28))
+
+    assert "ДАТА" not in invitation
+    assert "28.07.2026" in invitation
+
+
+def test_unknown_service_center_fails_explicitly():
+    catalog = InvitationCatalog.from_csv(SAMPLE_CSV)
+
+    with pytest.raises(LookupError, match="не найдено"):
+        catalog.find("Неизвестный склад")
+
+
+def test_google_source_uses_expected_csv_endpoint():
+    http = FakeHttp()
+    source = GoogleSheetInvitationSource("sheet_123", "420777109", http=http)
+
+    catalog = source.load()
+
+    assert len(catalog) == 2
+    assert http.calls == [
+        (
+            "https://docs.google.com/spreadsheets/d/sheet_123/gviz/tq"
+            "?tqx=out:csv&gid=420777109",
+            30,
+        )
+    ]

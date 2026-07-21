@@ -68,4 +68,3 @@ def _parse_date(value: str, fmt: str) -> date:
     from datetime import datetime
 
     return datetime.strptime(value, fmt).date()
-
