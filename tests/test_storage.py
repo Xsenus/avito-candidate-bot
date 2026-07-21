@@ -18,3 +18,25 @@ def test_state_and_processed_messages_survive_reopen(tmp_path):
     assert second.is_processed("chat-1", "message-1")
     assert second.pending()[0][0] == "chat-1"
     second.close()
+
+
+def test_interrupted_submission_is_quarantined_without_retry(tmp_path):
+    path = tmp_path / "interrupted.sqlite3"
+    store = SQLiteStateStore(path)
+    store.save(
+        "chat-interrupted",
+        ConversationState(
+            step="ready_to_submit",
+            application_status="submitting",
+            next_retry_at="2026-07-21T00:00:00+00:00",
+        ),
+    )
+
+    assert store.quarantine_interrupted_submissions() == 1
+    restored = store.load("chat-interrupted")
+    assert restored.application_status == "uncertain"
+    assert restored.next_retry_at is None
+    assert "проверьте заявку вручную" in (restored.last_error or "")
+    assert store.pending() == []
+    assert store.quarantine_interrupted_submissions() == 0
+    store.close()

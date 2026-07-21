@@ -107,6 +107,36 @@ class SQLiteStateStore:
                 result.append((chat_id, state))
         return result
 
+    def quarantine_interrupted_submissions(self) -> int:
+        """Prevent an automatic duplicate after a crash during form submission."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT chat_id, state_json FROM conversations"
+            ).fetchall()
+            changed = 0
+            for chat_id, raw in rows:
+                payload = json.loads(raw)
+                if payload.get("application_status") != "submitting":
+                    continue
+                payload["application_status"] = "uncertain"
+                payload["last_error"] = (
+                    "Процесс был остановлен во время отправки формы; "
+                    "перед повтором проверьте заявку вручную"
+                )
+                payload["next_retry_at"] = None
+                self._connection.execute(
+                    """
+                    UPDATE conversations
+                    SET state_json = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE chat_id = ?
+                    """,
+                    (json.dumps(payload, ensure_ascii=False), chat_id),
+                )
+                changed += 1
+            if changed:
+                self._connection.commit()
+        return changed
+
     def get_metadata(self, key: str) -> str | None:
         with self._lock:
             row = self._connection.execute(

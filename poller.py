@@ -212,6 +212,12 @@ def main() -> None:
     )
     state_path = os.getenv("STATE_DB_PATH", str(Path(PROJECT_ROOT) / "data" / "bot.sqlite3"))
     store = SQLiteStateStore(state_path)
+    interrupted = store.quarantine_interrupted_submissions()
+    if interrupted:
+        print(
+            f"WARNING: quarantined {interrupted} interrupted form submission(s); "
+            "manual verification is required"
+        )
     workflow = CandidateWorkflow.from_env(YandexFormSubmitter.from_env())
     interval = max(5, int(os.getenv("POLL_INTERVAL_SECONDS", "15")))
     print(f"Starting poller with interval={interval}s state_db={state_path}")
