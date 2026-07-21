@@ -156,7 +156,12 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
         return INTERNSHIP_MESSAGE
 
     if state.step == "awaiting_staj":
-        if is_positive(cleaned) or looks_like_datetime(cleaned):
+        if looks_like_datetime(cleaned):
+            state.date_time = text.strip()
+            state.internship_date = resolve_internship_date(text).strftime("%d.%m.%Y")
+            state.step = "awaiting_full_name"
+            return CONFIRMATION_MESSAGE
+        if is_positive(cleaned):
             state.step = "awaiting_arrival"
             state.city = normalize_city(city_hint) or state.city
             address = resolve_address(state.city)
@@ -165,14 +170,14 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
         return "Готовы пройти стажировку?"
 
     if state.step == "awaiting_arrival":
-        if is_positive(cleaned):
-            state.step = "awaiting_datetime"
-            return STORE_SELECTION_MESSAGE.format(city=state.city or "вашем городе", address=state.address or ADDRESS_FALLBACK)
         if looks_like_datetime(cleaned):
             state.date_time = text.strip()
             state.internship_date = resolve_internship_date(text).strftime("%d.%m.%Y")
             state.step = "awaiting_full_name"
             return CONFIRMATION_MESSAGE
+        if is_positive(cleaned):
+            state.step = "awaiting_datetime"
+            return STORE_SELECTION_MESSAGE.format(city=state.city or "вашем городе", address=state.address or ADDRESS_FALLBACK)
         return "Стажировка каждый день в 8 утра на какой день вас записать? Укажите день недели например: Вторник"
 
     if state.step == "awaiting_datetime":
@@ -293,7 +298,25 @@ def _walk(value: Any):
 def is_positive(text: str) -> bool:
     cleaned = re.sub(r"[^\w\s]", "", (text or "").strip().lower())
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned in {"да", "согласен", "согласна", "угу", "ок", "yes", "y", "ok", "давай", "готов"}
+    if re.search(r"\b(?:нет|отказ|не\s+готов(?:а)?|не\s+соглас(?:ен|на)|не\s+интересно)\b", cleaned):
+        return False
+    positive_words = {
+        "да",
+        "согласен",
+        "согласна",
+        "угу",
+        "ок",
+        "yes",
+        "y",
+        "ok",
+        "давай",
+        "готов",
+        "готова",
+        "конечно",
+        "хорошо",
+        "интересно",
+    }
+    return any(word in positive_words for word in cleaned.split())
 
 
 def looks_like_datetime(text: str) -> bool:
