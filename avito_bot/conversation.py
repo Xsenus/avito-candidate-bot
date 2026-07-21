@@ -23,6 +23,11 @@ class ConversationState:
     date_time: str | None = None
     internship_date: str | None = None
     tariff: str = "Драйв"
+    citizenship: str = field(
+        default_factory=lambda: os.getenv(
+            "YANDEX_FORM_CITIZENSHIP", "Российская Федерация"
+        )
+    )
     notes: dict[str, str] = field(default_factory=dict)
     resume_step: str | None = None
 
@@ -234,6 +239,7 @@ def submit_form(state: ConversationState) -> None:
         "phone": state.phone or "",
         "date_time": state.internship_date or "",
         "tariff": state.tariff,
+        "citizenship": state.citizenship,
         "address": state.address or "",
         "consent": "on",
     }

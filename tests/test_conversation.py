@@ -19,6 +19,7 @@ def test_candidate_answers_are_normalized(monkeypatch):
     assert state.phone == "+79916410399"
     assert state.internship_date == "28.07.2026"
     assert state.tariff == "Драйв"
+    assert state.citizenship == "Российская Федерация"
 
 
 def test_invalid_phone_does_not_finish_conversation():
