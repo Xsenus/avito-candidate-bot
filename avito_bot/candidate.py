@@ -17,9 +17,16 @@ WEEKDAY_PATTERNS = {
 
 def split_full_name(value: str) -> tuple[str, str]:
     """Return surname and first name from the candidate's answer."""
-    parts = [part for part in re.split(r"\s+", (value or "").strip()) if part]
+    parts = [
+        part.strip(",.;:")
+        for part in re.split(r"\s+", (value or "").strip())
+        if part.strip(",.;:")
+    ]
     if len(parts) < 2:
         raise ValueError("Укажите фамилию и имя через пробел")
+    name_pattern = re.compile(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'’-]*$")
+    if not name_pattern.fullmatch(parts[0]) or not name_pattern.fullmatch(parts[1]):
+        raise ValueError("Фамилия и имя должны содержать буквы, без номера телефона")
     return parts[0], parts[1]
 
 

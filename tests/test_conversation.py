@@ -60,6 +60,16 @@ def test_full_name_and_phone_can_be_sent_in_one_message():
     assert state.application_status == "pending"
 
 
+def test_first_name_and_phone_are_not_submitted_as_full_name():
+    state = ConversationState(step="awaiting_full_name")
+
+    reply = handle_user_message(state, "Виталий 8 (927) 206-97-01")
+
+    assert "фамилия" in reply.lower()
+    assert state.step == "awaiting_full_name"
+    assert state.application_status == "collecting"
+
+
 def test_unknown_city_does_not_expose_an_unrelated_spreadsheet():
     assert resolve_address("Неизвестный город") == ADDRESS_FALLBACK
     assert "docs.google.com" not in ADDRESS_FALLBACK
