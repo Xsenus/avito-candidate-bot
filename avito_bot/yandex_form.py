@@ -60,12 +60,35 @@ class YandexFormSubmitter:
         """Fill all fields without pressing Submit; useful after the URL changes."""
         self._run(application, do_submit=False)
 
+    def validate_warehouse_options(self, warehouses: list[str]) -> None:
+        """Verify active warehouse options without filling or submitting an answer."""
+        self._validate_url()
+        options = list(dict.fromkeys(option.strip() for option in warehouses if option.strip()))
+        if not options:
+            raise ValueError("Нет складов для проверки")
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise FormConfigurationError(
+                "Playwright не установлен; выполните python -m playwright install chromium"
+            ) from exc
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(locale="ru-RU")
+                page.goto(self.form_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                page.get_by_role("button", name="Отправить").wait_for(
+                    state="visible", timeout=self.timeout_ms
+                )
+                for option in options:
+                    self._select_option(page, "Выберите склад", option)
+            finally:
+                browser.close()
+
     def _run(self, application: CandidateApplication, *, do_submit: bool) -> None:
         application.validate()
-        if not self.form_url:
-            raise FormConfigurationError("YANDEX_FORM_URL не настроен")
-        if not self.form_url.startswith("https://forms.yandex.ru/"):
-            raise FormConfigurationError("YANDEX_FORM_URL должен вести на forms.yandex.ru")
+        self._validate_url()
 
         try:
             from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -140,6 +163,12 @@ class YandexFormSubmitter:
                     ) from exc
             finally:
                 browser.close()
+
+    def _validate_url(self) -> None:
+        if not self.form_url:
+            raise FormConfigurationError("YANDEX_FORM_URL не настроен")
+        if not self.form_url.startswith("https://forms.yandex.ru/"):
+            raise FormConfigurationError("YANDEX_FORM_URL должен вести на forms.yandex.ru")
 
     @staticmethod
     def _select_option(page, question: str, option: str) -> None:
