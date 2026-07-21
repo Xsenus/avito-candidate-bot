@@ -2,6 +2,7 @@ import pytest
 
 from avito_bot.invitations import InvitationCatalog
 from avito_bot.service_centers import (
+    form_option_for,
     parse_service_center_overrides,
     resolve_service_center,
 )
@@ -23,7 +24,13 @@ def test_city_resolves_to_center_with_same_name():
 
 
 def test_city_alias_resolves_to_sheet_name():
-    assert resolve_service_center("Ростов-на-Дону", None, CATALOG).name == "Ростов"
+    selection = resolve_service_center("Ростов-на-Дону", None, CATALOG)
+    assert selection.name == "Ростов"
+    assert selection.form_option == "СЦ Ростов-на-Дону"
+
+
+def test_form_warehouse_name_can_be_configured_separately():
+    assert form_option_for("Шушары", {"Шушары": "СЦ СПБ Южный"}) == "СЦ СПБ Южный"
 
 
 def test_item_override_has_priority():

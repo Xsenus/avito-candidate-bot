@@ -154,7 +154,13 @@ class YandexFormSubmitter:
         combobox.click()
         filters = page.get_by_role("textbox", name="Фильтр")
         if filters.count():
-            filters.last.fill(option)
+            visible_filter = None
+            for index in range(filters.count()):
+                candidate = filters.nth(index)
+                if candidate.is_visible():
+                    visible_filter = candidate
+            if visible_filter is not None:
+                visible_filter.fill(option)
         choice = page.get_by_role("option", name=option, exact=True)
         if choice.count() != 1:
             raise FormSubmissionError(

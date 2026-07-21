@@ -19,6 +19,10 @@ CITY_ALIASES = {
     "нижний новгород": "Нижний Новгород",
 }
 
+FORM_WAREHOUSE_ALIASES = {
+    "ростов": "Ростов-на-Дону",
+}
+
 
 @dataclass(frozen=True)
 class ServiceCenterSelection:
@@ -26,7 +30,19 @@ class ServiceCenterSelection:
 
     @property
     def form_option(self) -> str:
-        return f"СЦ {self.name}"
+        return form_option_for(self.name)
+
+
+def form_option_for(
+    service_center: str, overrides: dict[str, str] | None = None
+) -> str:
+    configured = overrides or {}
+    form_name = configured.get(service_center) or configured.get(service_center.casefold())
+    if not form_name:
+        form_name = FORM_WAREHOUSE_ALIASES.get(
+            service_center.casefold(), service_center
+        )
+    return form_name if form_name.casefold().startswith("сц ") else f"СЦ {form_name}"
 
 
 def parse_service_center_overrides(raw: str | None) -> dict[str, str]:

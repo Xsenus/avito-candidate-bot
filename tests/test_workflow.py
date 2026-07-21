@@ -24,6 +24,14 @@ class FakeInvitationSource:
         )
 
 
+class RostovInvitationSource:
+    def load(self):
+        return InvitationCatalog.from_csv(
+            '"СЦ","Текст сообщения"\n'
+            '"Ростов","Приглашение Ростов ДАТА"\n'
+        )
+
+
 def ready_state():
     return ConversationState(
         step="ready_to_submit",
@@ -82,3 +90,15 @@ def test_form_failure_keeps_application_pending_and_returns_no_invitation():
     assert state.application_status == "pending"
     assert state.step == "ready_to_submit"
     assert state.last_error == "form unavailable"
+
+
+def test_rostov_uses_different_form_and_invitation_names():
+    form = FakeForm()
+    workflow = CandidateWorkflow(form, RostovInvitationSource())
+    state = ready_state()
+    state.city = "Ростов-на-Дону"
+
+    invitation = workflow.complete(state)
+
+    assert form.applications[0].warehouse == "СЦ Ростов-на-Дону"
+    assert invitation == "Приглашение Ростов 23.07.2026"

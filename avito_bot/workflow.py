@@ -5,7 +5,11 @@ from typing import Callable, Protocol
 
 from .conversation import ConversationState
 from .invitations import GoogleSheetInvitationSource
-from .service_centers import parse_service_center_overrides, resolve_service_center
+from .service_centers import (
+    form_option_for,
+    parse_service_center_overrides,
+    resolve_service_center,
+)
 from .yandex_form import CandidateApplication
 
 
@@ -23,10 +27,12 @@ class CandidateWorkflow:
         invitation_source: GoogleSheetInvitationSource,
         *,
         service_center_overrides: dict[str, str] | None = None,
+        form_warehouse_overrides: dict[str, str] | None = None,
     ) -> None:
         self.form_submitter = form_submitter
         self.invitation_source = invitation_source
         self.service_center_overrides = service_center_overrides or {}
+        self.form_warehouse_overrides = form_warehouse_overrides or {}
 
     @classmethod
     def from_env(cls, form_submitter: FormSubmitter) -> "CandidateWorkflow":
@@ -37,7 +43,15 @@ class CandidateWorkflow:
         overrides = parse_service_center_overrides(
             os.getenv("SERVICE_CENTER_OVERRIDES_JSON", "")
         )
-        return cls(form_submitter, source, service_center_overrides=overrides)
+        form_overrides = parse_service_center_overrides(
+            os.getenv("FORM_WAREHOUSE_OVERRIDES_JSON", "")
+        )
+        return cls(
+            form_submitter,
+            source,
+            service_center_overrides=overrides,
+            form_warehouse_overrides=form_overrides,
+        )
 
     def complete(
         self,
@@ -61,7 +75,9 @@ class CandidateWorkflow:
 
         if state.application_status != "submitted":
             application = CandidateApplication(
-                warehouse=selection.form_option,
+                warehouse=form_option_for(
+                    selection.name, self.form_warehouse_overrides
+                ),
                 tariff=state.tariff,
                 last_name=state.last_name or "",
                 first_name=state.first_name or "",
