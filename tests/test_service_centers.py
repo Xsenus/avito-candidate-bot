@@ -13,6 +13,7 @@ CATALOG = InvitationCatalog.from_csv(
     '"Кемерово","Приходите ДАТА"\n'
     '"Ростов","Приходите ДАТА"\n'
     '"Дмитровское","Приходите ДАТА"\n'
+    '"Север","Приходите ДАТА"\n'
     '"Троицкий","Приходите ДАТА"\n'
 )
 
@@ -42,7 +43,11 @@ def test_item_override_has_priority():
 
 @pytest.mark.parametrize(
     ("city", "expected"),
-    [("Москва", "Дмитровское"), ("Санкт-Петербург", "Троицкий")],
+    [
+        ("Москва", "Дмитровское"),
+        ("Мытищи", "Север"),
+        ("Санкт-Петербург", "Троицкий"),
+    ],
 )
 def test_verified_big_city_defaults(city, expected):
     assert resolve_service_center(city, None, CATALOG).name == expected
