@@ -4,6 +4,7 @@ from avito_bot.storage import SQLiteStateStore
 from avito_bot.workflow import CandidateWorkflow
 from poller import (
     extract_chat_context,
+    infer_step_from_bot_message,
     initialize_message_cursor,
     iter_new_chat_messages,
     process_chat_message,
@@ -102,6 +103,47 @@ def test_history_bootstrap_marks_every_recent_message(tmp_path):
     assert store.is_processed("chat-1", "older")
     assert store.get_metadata("message_history_cursor_initialized_v2") == "true"
     store.close()
+
+
+def test_history_bootstrap_restores_prompt_and_keeps_later_reply(tmp_path):
+    from avito_bot.conversation import CONFIRMATION_MESSAGE
+
+    store = SQLiteStateStore(tmp_path / "migration.sqlite3")
+    messages = [
+        {
+            "id": "candidate-name",
+            "created": 200,
+            "direction": "in",
+            "type": "text",
+            "content": {"text": "Травкин Виталий"},
+        },
+        {
+            "id": "bot-prompt",
+            "created": 100,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": CONFIRMATION_MESSAGE},
+        },
+    ]
+    client = FakeHistoryClient(messages)
+
+    initialize_message_cursor(client, store, [chat()])
+
+    restored = store.load("chat-1")
+    assert restored.step == "awaiting_full_name"
+    assert restored.city == "Кемерово"
+    assert store.is_processed("chat-1", "bot-prompt")
+    assert not store.is_processed("chat-1", "candidate-name")
+    store.close()
+
+
+def test_known_bot_prompts_map_to_expected_steps():
+    from avito_bot.conversation import ADDRESS_MESSAGE, INTERNSHIP_MESSAGE
+
+    assert infer_step_from_bot_message(INTERNSHIP_MESSAGE) == "awaiting_staj"
+    assert infer_step_from_bot_message(ADDRESS_MESSAGE) == "awaiting_datetime"
+    assert infer_step_from_bot_message("И номер") == "awaiting_phone"
+    assert infer_step_from_bot_message("ручное сообщение") is None
 
 
 class FakeClient:

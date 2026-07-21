@@ -15,8 +15,12 @@ if PROJECT_ROOT not in sys.path:
 
 from avito_bot.avito_client import AvitoClient
 from avito_bot.conversation import (
+    ADDRESS_MESSAGE,
+    CONFIRMATION_MESSAGE,
     FOLLOW_UP_MESSAGE,
     INITIAL_MESSAGE,
+    INTERNSHIP_MESSAGE,
+    STORE_SELECTION_MESSAGE,
     ConversationState,
     handle_user_message,
     schedule_delayed_message,
@@ -155,13 +159,58 @@ def initialize_message_cursor(
             chat_id = str(chat.get("id") or "").strip()
             if not chat_id:
                 continue
-            for message in client.get_messages(chat_id, limit=100):
+            messages = oldest_first(client.get_messages(chat_id, limit=100))
+            state = store.load(chat_id)
+            prompt_index = None
+            inferred_step = None
+            if state.application_status == "collecting":
+                for index, message in enumerate(messages):
+                    if message.get("direction") != "out" or message.get("type") != "text":
+                        continue
+                    content = message.get("content") or {}
+                    text = content.get("text") if isinstance(content, dict) else None
+                    step = infer_step_from_bot_message(text)
+                    if step:
+                        prompt_index = index
+                        inferred_step = step
+
+            if inferred_step:
+                city, item_id = extract_chat_context(chat)
+                state.step = inferred_step
+                state.city = city or state.city
+                state.item_id = item_id or state.item_id
+                store.save(chat_id, state)
+
+            for index, message in enumerate(messages):
                 message_id = str(message.get("id") or "").strip()
-                if message_id:
+                if not message_id:
+                    continue
+                is_new_candidate_reply = (
+                    prompt_index is not None
+                    and index > prompt_index
+                    and message.get("direction") == "in"
+                    and message.get("type") == "text"
+                )
+                if not is_new_candidate_reply:
                     store.mark_processed(chat_id, message_id)
                     count += 1
         print(f"Bootstrap: skipped {count} existing messages")
     store.set_metadata(cursor_key, "true")
+
+
+def infer_step_from_bot_message(text: str | None) -> str | None:
+    normalized = (text or "").strip()
+    if normalized in {INITIAL_MESSAGE.strip(), FOLLOW_UP_MESSAGE.strip()}:
+        return "awaiting_interest"
+    if normalized == INTERNSHIP_MESSAGE.strip():
+        return "awaiting_staj"
+    if normalized in {ADDRESS_MESSAGE.strip(), STORE_SELECTION_MESSAGE.strip()}:
+        return "awaiting_datetime"
+    if normalized == CONFIRMATION_MESSAGE.strip():
+        return "awaiting_full_name"
+    if normalized == "И номер":
+        return "awaiting_phone"
+    return None
 
 
 def process_chat_message(
