@@ -48,6 +48,21 @@ def test_invitation_replaces_date_marker():
     assert "28.07.2026" in invitation
 
 
+def test_catalog_rejects_invitation_without_date_marker():
+    with pytest.raises(ValueError, match="нет маркера ДАТА"):
+        InvitationCatalog.from_csv(
+            '"СЦ","Текст сообщения"\n"Кемерово","Приходите на стажировку"\n'
+        )
+
+
+def test_catalog_rejects_invitation_over_avito_limit():
+    text = "ДАТА " + "я" * 1000
+    with pytest.raises(ValueError, match="превышает лимит Avito"):
+        InvitationCatalog.from_csv(
+            f'"СЦ","Текст сообщения"\n"Кемерово","{text}"\n'
+        )
+
+
 def test_unknown_service_center_fails_explicitly():
     catalog = InvitationCatalog.from_csv(SAMPLE_CSV)
 

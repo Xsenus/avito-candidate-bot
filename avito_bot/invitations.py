@@ -12,6 +12,8 @@ import requests
 
 DEFAULT_SHEET_ID = "1D6aP4Vjt05QMRIogvdtX0wKblbgnNrg-I8lF0Fq26zs"
 DEFAULT_SHEET_GID = "420777109"
+DATE_MARKER = "ДАТА"
+AVITO_TEXT_LIMIT = 1000
 
 
 class HttpClient(Protocol):
@@ -31,7 +33,13 @@ class InvitationTemplate:
         )
         if not formatted:
             raise ValueError("Дата стажировки не указана")
-        return self.text.replace("ДАТА", formatted)
+        rendered = self.text.replace(DATE_MARKER, formatted)
+        if len(rendered) > AVITO_TEXT_LIMIT:
+            raise ValueError(
+                f"Приглашение для СЦ «{self.service_center}» превышает "
+                f"лимит Avito {AVITO_TEXT_LIMIT} символов"
+            )
+        return rendered
 
 
 class InvitationCatalog:
@@ -41,6 +49,15 @@ class InvitationCatalog:
             key = normalize_service_center(template.service_center)
             if not key:
                 continue
+            if DATE_MARKER not in template.text:
+                raise ValueError(
+                    f"В приглашении для СЦ «{template.service_center}» нет маркера ДАТА"
+                )
+            if len(template.text.replace(DATE_MARKER, "31.12.2099")) > AVITO_TEXT_LIMIT:
+                raise ValueError(
+                    f"Приглашение для СЦ «{template.service_center}» превышает "
+                    f"лимит Avito {AVITO_TEXT_LIMIT} символов"
+                )
             if key in self._by_center:
                 raise ValueError(f"СЦ повторяется в таблице: {template.service_center}")
             self._by_center[key] = template
