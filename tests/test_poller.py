@@ -163,3 +163,60 @@ def test_phone_triggers_form_then_invitation_and_persists_completion(tmp_path):
     assert restored.step == "done"
     assert store.is_processed("chat-1", "message-1")
     store.close()
+
+
+def test_complete_candidate_journey_survives_state_reload(tmp_path, monkeypatch):
+    store = SQLiteStateStore(tmp_path / "journey.sqlite3")
+    client = FakeClient()
+    form = FakeForm()
+    workflow = CandidateWorkflow(form, FakeInvitationSource())
+    delayed = []
+    monkeypatch.setattr(
+        "poller.schedule_delayed_message",
+        lambda client, chat_id, text, delay: delayed.append((chat_id, text, delay)),
+    )
+    def fixed_internship_date(value):
+        if "четверг" in value.lower():
+            return __import__("datetime").date(2026, 7, 23)
+        raise ValueError("not a date")
+
+    monkeypatch.setattr(
+        "avito_bot.conversation.resolve_internship_date", fixed_internship_date
+    )
+
+    answers = [
+        "Здравствуйте",
+        "Да, интересно",
+        "Да, готов",
+        "в четверг",
+        "Травкин Виталий",
+        "8 (927) 206-97-01",
+    ]
+    for index, answer in enumerate(answers, start=1):
+        process_chat_message(
+            client,
+            workflow,
+            store,
+            "chat-journey",
+            store.load("chat-journey"),
+            {"content": {"text": answer}},
+            f"message-{index}",
+            "Кемерово",
+            "8288057518",
+        )
+
+    restored = store.load("chat-journey")
+    assert restored.step == "done"
+    assert restored.application_status == "completed"
+    assert restored.last_name == "Травкин"
+    assert restored.first_name == "Виталий"
+    assert restored.phone == "+79272069701"
+    assert restored.internship_date == "23.07.2026"
+    assert len(form.applications) == 1
+    assert form.applications[0].warehouse == "СЦ Кемерово"
+    assert form.applications[0].tariff == "Драйв"
+    assert form.applications[0].citizenship == "Российская Федерация"
+    assert client.messages[-1][1] == "Приглашение на 23.07.2026, Кемерово"
+    assert len(delayed) == 1
+    assert all(store.is_processed("chat-journey", f"message-{i}") for i in range(1, 7))
+    store.close()
