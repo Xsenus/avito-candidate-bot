@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
 
 
 class FormConfigurationError(RuntimeError):
@@ -113,23 +114,30 @@ class YandexFormSubmitter:
                     "На каком автомобиле хотели бы доставлять заказы?",
                     application.tariff,
                 )
-                page.get_by_role("textbox", name=re.compile(r"^Фамилия")).fill(
-                    application.last_name
+                self._fill_and_verify(
+                    page.get_by_role("textbox", name=re.compile(r"^Фамилия")),
+                    application.last_name,
+                    "Фамилия",
                 )
-                page.get_by_role("textbox", name=re.compile(r"^Имя")).fill(
-                    application.first_name
+                self._fill_and_verify(
+                    page.get_by_role("textbox", name=re.compile(r"^Имя")),
+                    application.first_name,
+                    "Имя",
                 )
                 self._select_option(page, "Гражданство", application.citizenship)
-                page.get_by_role("textbox", name=re.compile(r"^Телефон")).fill(
-                    application.phone
+                self._fill_and_verify(
+                    page.get_by_role("textbox", name=re.compile(r"^Телефон")),
+                    application.phone,
+                    "Телефон",
                 )
-                page.get_by_role("combobox", name="ДД.ММ.ГГГГ").fill(
-                    application.internship_date
-                )
-                page.get_by_role(
+                self._select_date(page, application.internship_date)
+                consent = page.get_by_role(
                     "checkbox",
                     name=re.compile(r"согласие на обработку", re.IGNORECASE),
-                ).check()
+                )
+                consent.check()
+                if not consent.is_checked():
+                    raise FormSubmissionError("Форма не установила согласие на обработку данных")
 
                 if not do_submit:
                     return
@@ -169,6 +177,83 @@ class YandexFormSubmitter:
             raise FormConfigurationError("YANDEX_FORM_URL не настроен")
         if not self.form_url.startswith("https://forms.yandex.ru/"):
             raise FormConfigurationError("YANDEX_FORM_URL должен вести на forms.yandex.ru")
+
+    @staticmethod
+    def _fill_and_verify(locator, value: str, label: str) -> None:
+        locator.fill(value)
+        actual = locator.input_value()
+        if actual != value:
+            raise FormSubmissionError(
+                f"Поле «{label}» не приняло значение: ожидалось {value!r}, получено {actual!r}"
+            )
+
+    def _select_date(self, page, value: str) -> None:
+        try:
+            target = datetime.strptime(value, "%d.%m.%Y").date()
+        except ValueError as exc:
+            raise FormSubmissionError(
+                f"Дата стажировки должна быть в формате ДД.ММ.ГГГГ: {value!r}"
+            ) from exc
+
+        current = date.today().replace(day=1)
+        target_month = target.replace(day=1)
+        months_ahead = (target_month.year - current.year) * 12 + (
+            target_month.month - current.month
+        )
+        if months_ahead < 0 or months_ahead > 24:
+            raise FormSubmissionError(
+                "Дата стажировки должна быть в пределах ближайших 24 месяцев"
+            )
+
+        page.get_by_role("button", name="Календарь").click()
+        dialog = page.get_by_role("dialog")
+        dialog.wait_for(state="visible", timeout=self.timeout_ms)
+        for _ in range(months_ahead):
+            dialog.get_by_role("button", name="Вперёд", exact=True).click()
+
+        label = self._russian_date_label(target)
+        target_button = dialog.get_by_role("button", name=label, exact=True)
+        if target_button.count() != 1:
+            raise FormSubmissionError(
+                f"В календаре не найдена дата «{label}»"
+            )
+        target_button.click()
+
+        date_input = page.get_by_role("combobox", name="ДД.ММ.ГГГГ")
+        actual_digits = re.sub(r"\D", "", date_input.input_value())
+        expected_digits = target.strftime("%d%m%Y")
+        if actual_digits != expected_digits:
+            raise FormSubmissionError(
+                f"Поле даты не приняло значение {value!r}: получено {date_input.input_value()!r}"
+            )
+
+    @staticmethod
+    def _russian_date_label(value: date) -> str:
+        weekdays = (
+            "понедельник",
+            "вторник",
+            "среда",
+            "четверг",
+            "пятница",
+            "суббота",
+            "воскресенье",
+        )
+        months = (
+            "",
+            "января",
+            "февраля",
+            "марта",
+            "апреля",
+            "мая",
+            "июня",
+            "июля",
+            "августа",
+            "сентября",
+            "октября",
+            "ноября",
+            "декабря",
+        )
+        return f"{weekdays[value.weekday()]}, {value.day} {months[value.month]} {value.year} г."
 
     @staticmethod
     def _select_option(page, question: str, option: str) -> None:
