@@ -1,6 +1,7 @@
 from avito_bot.conversation import ConversationState
 from avito_bot.invitations import InvitationCatalog
 from avito_bot.workflow import CandidateWorkflow, mark_invitation_sent
+from avito_bot.yandex_form import FormSubmissionUncertainError
 
 
 class FakeForm:
@@ -14,6 +15,11 @@ class FakeForm:
 class FailingForm:
     def submit(self, application):
         raise RuntimeError("form unavailable")
+
+
+class UncertainForm:
+    def submit(self, application):
+        raise FormSubmissionUncertainError("submit result unknown")
 
 
 class FakeInvitationSource:
@@ -102,3 +108,18 @@ def test_rostov_uses_different_form_and_invitation_names():
 
     assert form.applications[0].warehouse == "СЦ Ростов-на-Дону"
     assert invitation == "Приглашение Ростов 23.07.2026"
+
+
+def test_unknown_submit_result_is_not_automatically_retried():
+    workflow = CandidateWorkflow(UncertainForm(), FakeInvitationSource())
+    state = ready_state()
+
+    try:
+        workflow.complete(state)
+    except FormSubmissionUncertainError:
+        pass
+    else:
+        raise AssertionError("uncertain result must be propagated")
+
+    assert state.application_status == "uncertain"
+    assert state.last_error == "submit result unknown"

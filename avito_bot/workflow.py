@@ -10,7 +10,7 @@ from .service_centers import (
     parse_service_center_overrides,
     resolve_service_center,
 )
-from .yandex_form import CandidateApplication
+from .yandex_form import CandidateApplication, FormSubmissionUncertainError
 
 
 class FormSubmitter(Protocol):
@@ -90,6 +90,11 @@ class CandidateWorkflow:
             persist(state)
             try:
                 self.form_submitter.submit(application)
+            except FormSubmissionUncertainError as exc:
+                state.application_status = "uncertain"
+                state.last_error = str(exc)
+                persist(state)
+                raise
             except Exception as exc:
                 state.application_status = "pending"
                 state.last_error = str(exc)

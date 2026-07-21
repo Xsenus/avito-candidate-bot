@@ -14,6 +14,12 @@ class FormSubmissionError(RuntimeError):
     pass
 
 
+class FormSubmissionUncertainError(FormSubmissionError):
+    """The submit button was pressed but the success result is unknown."""
+
+    pass
+
+
 @dataclass(frozen=True)
 class CandidateApplication:
     warehouse: str
@@ -165,7 +171,8 @@ class YandexFormSubmitter:
                     errors = page.locator('[role="alert"], [aria-invalid="true"]').all_inner_texts()
                     details = "; ".join(text.strip() for text in errors if text.strip())
                     suffix = f": {details}" if details else ""
-                    raise FormSubmissionError(
+                    error_type = FormSubmissionError if details else FormSubmissionUncertainError
+                    raise error_type(
                         "Яндекс Форма не подтвердила сохранение ответа"
                         f" (текущий адрес: {page.url}){suffix}"
                     ) from exc
