@@ -112,6 +112,13 @@ class YandexFormSubmitter:
                     return
 
                 page.get_by_role("button", name="Отправить").click()
+                success_url = re.compile(r"/success(?:[/?#]|$)", re.IGNORECASE)
+                try:
+                    page.wait_for_url(success_url, timeout=self.timeout_ms)
+                    return
+                except PlaywrightTimeoutError:
+                    pass
+
                 success_pattern = re.compile(
                     os.getenv(
                         "YANDEX_FORM_SUCCESS_TEXT",
@@ -121,14 +128,15 @@ class YandexFormSubmitter:
                 )
                 try:
                     page.get_by_text(success_pattern).first.wait_for(
-                        state="visible", timeout=self.timeout_ms
+                        state="visible", timeout=min(5_000, self.timeout_ms)
                     )
                 except PlaywrightTimeoutError as exc:
                     errors = page.locator('[role="alert"], [aria-invalid="true"]').all_inner_texts()
                     details = "; ".join(text.strip() for text in errors if text.strip())
                     suffix = f": {details}" if details else ""
                     raise FormSubmissionError(
-                        f"Яндекс Форма не подтвердила сохранение ответа{suffix}"
+                        "Яндекс Форма не подтвердила сохранение ответа"
+                        f" (текущий адрес: {page.url}){suffix}"
                     ) from exc
             finally:
                 browser.close()
