@@ -1,0 +1,14 @@
+[Unit]
+Description=Avito bot poller
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/avito_bot
+ExecStart=/root/avito_bot/venv/bin/python -u /root/avito_bot/poller.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
