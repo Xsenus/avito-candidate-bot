@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -67,6 +68,10 @@ class YandexFormSubmitter:
         """Fill all fields without pressing Submit; useful after the URL changes."""
         self._run(application, do_submit=False)
 
+    def validate_submission_request(self, application: CandidateApplication) -> None:
+        """Click Submit, block every write request, and verify its JSON payload."""
+        self._run(application, do_submit=True, intercept_submission=True)
+
     def validate_warehouse_options(self, warehouses: list[str]) -> None:
         """Verify active warehouse options without filling or submitting an answer."""
         self._validate_url()
@@ -93,7 +98,13 @@ class YandexFormSubmitter:
             finally:
                 browser.close()
 
-    def _run(self, application: CandidateApplication, *, do_submit: bool) -> None:
+    def _run(
+        self,
+        application: CandidateApplication,
+        *,
+        do_submit: bool,
+        intercept_submission: bool = False,
+    ) -> None:
         application.validate()
         self._validate_url()
 
@@ -148,7 +159,30 @@ class YandexFormSubmitter:
                 if not do_submit:
                     return
 
+                captured_writes: list[dict[str, str | None]] = []
+                if intercept_submission:
+
+                    def intercept_write(route, request) -> None:
+                        if request.method.upper() != "GET":
+                            captured_writes.append(
+                                {
+                                    "method": request.method,
+                                    "url": request.url,
+                                    "post_data": request.post_data,
+                                    "content_type": request.headers.get("content-type"),
+                                }
+                            )
+                            route.abort()
+                            return
+                        route.continue_()
+
+                    page.route("**/*", intercept_write)
+
                 page.get_by_role("button", name="Отправить").click()
+                if intercept_submission:
+                    page.wait_for_timeout(min(3_000, self.timeout_ms))
+                    self._verify_intercepted_submission(captured_writes, application)
+                    return
                 success_url = re.compile(r"/success(?:[/?#]|$)", re.IGNORECASE)
                 try:
                     page.wait_for_url(success_url, timeout=self.timeout_ms)
@@ -178,6 +212,49 @@ class YandexFormSubmitter:
                     ) from exc
             finally:
                 browser.close()
+
+    @staticmethod
+    def _verify_intercepted_submission(
+        writes: list[dict[str, str | None]], application: CandidateApplication
+    ) -> None:
+        candidates = [
+            write
+            for write in writes
+            if (write.get("method") or "").upper() == "POST"
+            and "forms.yandex.ru" in (write.get("url") or "")
+            and write.get("post_data")
+        ]
+        if len(candidates) != 1:
+            raise FormSubmissionError(
+                "Кнопка формы не сформировала единственный POST-запрос Яндекс Формы"
+            )
+        try:
+            payload = json.loads(candidates[0]["post_data"] or "")
+        except json.JSONDecodeError as exc:
+            raise FormSubmissionError(
+                "Яндекс Форма сформировала POST-запрос не в формате JSON"
+            ) from exc
+
+        serialized = json.dumps(payload, ensure_ascii=False)
+        expected_date = datetime.strptime(
+            application.internship_date, "%d.%m.%Y"
+        ).strftime("%Y-%m-%d")
+        missing = [
+            label
+            for label, value in (
+                ("фамилия", application.last_name),
+                ("имя", application.first_name),
+                ("телефон", application.phone),
+                ("дата", expected_date),
+            )
+            if value not in serialized
+        ]
+        if not any(value is True for value in _walk_json_values(payload)):
+            missing.append("согласие")
+        if missing:
+            raise FormSubmissionError(
+                "В перехваченном запросе формы отсутствуют поля: " + ", ".join(missing)
+            )
 
     def _validate_url(self) -> None:
         if not self.form_url:
@@ -288,3 +365,14 @@ class YandexFormSubmitter:
                 f"В поле «{question}» нет единственного варианта «{option}»"
             )
         choice.click()
+
+
+def _walk_json_values(value):
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from _walk_json_values(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_json_values(child)
+    else:
+        yield value

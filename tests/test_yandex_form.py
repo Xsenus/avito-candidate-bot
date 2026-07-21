@@ -4,6 +4,7 @@ from datetime import date
 from avito_bot.yandex_form import (
     CandidateApplication,
     FormConfigurationError,
+    FormSubmissionError,
     YandexFormSubmitter,
 )
 
@@ -41,3 +42,50 @@ def test_calendar_accessible_label_matches_yandex_format():
     assert YandexFormSubmitter._russian_date_label(date(2026, 7, 30)) == (
         "четверг, 30 июля 2026 г."
     )
+
+
+def test_intercepted_submission_contains_candidate_fields():
+    payload = {
+        "values": {
+            "surname": "Иванов",
+            "name": "Иван",
+            "phone": "+79916410399",
+            "date": "2026-07-23",
+            "consent": True,
+        }
+    }
+
+    YandexFormSubmitter._verify_intercepted_submission(
+        [
+            {
+                "method": "POST",
+                "url": "https://forms.yandex.ru/gateway/root/form/postSurvey",
+                "post_data": __import__("json").dumps(payload, ensure_ascii=False),
+                "content_type": "application/json",
+            }
+        ],
+        application(),
+    )
+
+
+def test_intercepted_submission_rejects_missing_phone():
+    payload = {
+        "values": {
+            "surname": "Иванов",
+            "name": "Иван",
+            "date": "2026-07-23",
+            "consent": True,
+        }
+    }
+    with pytest.raises(FormSubmissionError, match="телефон"):
+        YandexFormSubmitter._verify_intercepted_submission(
+            [
+                {
+                    "method": "POST",
+                    "url": "https://forms.yandex.ru/gateway/root/form/postSurvey",
+                    "post_data": __import__("json").dumps(payload, ensure_ascii=False),
+                    "content_type": "application/json",
+                }
+            ],
+            application(),
+        )

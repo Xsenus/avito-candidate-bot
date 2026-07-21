@@ -32,6 +32,8 @@ def main() -> None:
     )
     form.validate_schema(application)
     print("Yandex Form schema: OK (fields filled locally, response was not submitted)")
+    form.validate_submission_request(application)
+    print("Yandex Form submit request: OK (request was intercepted and not submitted)")
 
     active_warehouses = load_active_warehouses()
     form.validate_warehouse_options(active_warehouses)
