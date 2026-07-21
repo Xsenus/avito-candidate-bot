@@ -161,11 +161,8 @@ class YandexFormSubmitter:
                     "Телефон",
                 )
                 self._select_date(page, application.internship_date)
-                consent = page.get_by_role(
-                    "checkbox",
-                    name=re.compile(r"согласие на обработку", re.IGNORECASE),
-                )
-                consent.check()
+                consent = self._find_consent_checkbox(page)
+                consent.check(timeout=self.timeout_ms)
                 if not consent.is_checked():
                     raise FormSubmissionError("Форма не установила согласие на обработку данных")
 
@@ -274,6 +271,27 @@ class YandexFormSubmitter:
             raise FormConfigurationError("YANDEX_FORM_URL не настроен")
         if not self.form_url.startswith("https://forms.yandex.ru/"):
             raise FormConfigurationError("YANDEX_FORM_URL должен вести на forms.yandex.ru")
+
+    @staticmethod
+    def _find_consent_checkbox(page):
+        """Find the single consent control without depending on its full wording."""
+        by_label = page.get_by_role(
+            "checkbox",
+            name=re.compile(r"\bсогласие\b", re.IGNORECASE),
+        )
+        if by_label.count() == 1:
+            return by_label
+
+        by_field_type = page.locator(
+            'input[type="checkbox"][name^="answer_boolean_"]'
+        )
+        if by_field_type.count() == 1:
+            return by_field_type
+
+        raise FormConfigurationError(
+            "В Яндекс Форме не найден единственный чекбокс согласия; "
+            "структура формы изменилась"
+        )
 
     @staticmethod
     def _fill_and_verify(locator, value: str, label: str) -> None:

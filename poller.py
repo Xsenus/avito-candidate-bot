@@ -28,7 +28,7 @@ from avito_bot.conversation import (
 from avito_bot.candidate import normalize_phone, resolve_internship_date, split_full_name
 from avito_bot.storage import SQLiteStateStore
 from avito_bot.workflow import CandidateWorkflow, mark_invitation_sent
-from avito_bot.yandex_form import YandexFormSubmitter
+from avito_bot.yandex_form import FormConfigurationError, YandexFormSubmitter
 
 load_dotenv()
 
@@ -128,6 +128,9 @@ def complete_pending_application(
         invitation = workflow.complete(
             state, persist=lambda current: store.save(chat_id, current)
         )
+    except (FormConfigurationError, ValueError, LookupError) as exc:
+        pause_application(store, chat_id, state, exc)
+        return False
     except Exception as exc:
         schedule_retry(store, chat_id, state, exc)
         print(f"application error chat_id={chat_id}: {exc}")
@@ -156,11 +159,57 @@ def schedule_retry(
 ) -> None:
     state.last_error = str(error)
     state.submission_attempts += 1
+    max_retries = max(1, int(os.getenv("APPLICATION_MAX_RETRIES", "5")))
+    alert_after = max(1, int(os.getenv("APPLICATION_ALERT_AFTER_ATTEMPTS", "3")))
+    if state.submission_attempts >= max_retries:
+        state.application_status = (
+            "invitation_retry_exhausted"
+            if state.application_status == "submitted"
+            else "submission_retry_exhausted"
+        )
+        state.next_retry_at = None
+        state.alert_sent = True
+        store.save(chat_id, state)
+        print(
+            "ALERT application retries exhausted "
+            f"chat_id={chat_id} attempts={state.submission_attempts} error={error}"
+        )
+        return
+
     retry_seconds = max(30, int(os.getenv("APPLICATION_RETRY_SECONDS", "300")))
     state.next_retry_at = (
         datetime.now(timezone.utc) + timedelta(seconds=retry_seconds)
     ).isoformat()
+    if state.submission_attempts >= alert_after and not state.alert_sent:
+        state.alert_sent = True
+        print(
+            "ALERT repeated application failure "
+            f"chat_id={chat_id} attempts={state.submission_attempts} error={error}"
+        )
     store.save(chat_id, state)
+
+
+def pause_application(
+    store: SQLiteStateStore,
+    chat_id: str,
+    state: ConversationState,
+    error: Exception,
+) -> None:
+    """Stop automatic retries for deterministic configuration or data errors."""
+    state.application_status = (
+        "invitation_configuration_error"
+        if state.application_status == "submitted"
+        else "configuration_error"
+    )
+    state.last_error = str(error)
+    state.submission_attempts += 1
+    state.next_retry_at = None
+    state.alert_sent = True
+    store.save(chat_id, state)
+    print(
+        "ALERT application paused due to configuration error "
+        f"chat_id={chat_id} attempts={state.submission_attempts} error={error}"
+    )
 
 
 def initialize_message_cursor(
@@ -262,6 +311,7 @@ def return_to_collection(
     state.last_error = None
     state.next_retry_at = None
     state.submission_attempts = 0
+    state.alert_sent = False
     store.save(chat_id, state)
 
 

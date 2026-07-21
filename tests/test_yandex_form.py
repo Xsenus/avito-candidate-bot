@@ -101,3 +101,54 @@ def test_intercepted_submission_rejects_missing_phone():
             ],
             application(),
         )
+
+
+class ConsentLocator:
+    def __init__(self, count):
+        self._count = count
+
+    def count(self):
+        return self._count
+
+
+class ConsentPage:
+    def __init__(self, labelled_count, technical_count):
+        self.labelled = ConsentLocator(labelled_count)
+        self.technical = ConsentLocator(technical_count)
+        self.pattern = None
+        self.selector = None
+
+    def get_by_role(self, role, *, name):
+        assert role == "checkbox"
+        self.pattern = name
+        return self.labelled
+
+    def locator(self, selector):
+        self.selector = selector
+        return self.technical
+
+
+def test_consent_accepts_current_short_label():
+    page = ConsentPage(labelled_count=1, technical_count=0)
+
+    result = YandexFormSubmitter._find_consent_checkbox(page)
+
+    assert result is page.labelled
+    assert page.pattern.search("Я даю согласие")
+    assert page.pattern.search("Согласие на обработку данных")
+
+
+def test_consent_falls_back_to_unique_boolean_field():
+    page = ConsentPage(labelled_count=0, technical_count=1)
+
+    result = YandexFormSubmitter._find_consent_checkbox(page)
+
+    assert result is page.technical
+    assert page.selector == 'input[type="checkbox"][name^="answer_boolean_"]'
+
+
+def test_consent_rejects_ambiguous_or_missing_structure():
+    page = ConsentPage(labelled_count=0, technical_count=0)
+
+    with pytest.raises(FormConfigurationError, match="структура формы изменилась"):
+        YandexFormSubmitter._find_consent_checkbox(page)

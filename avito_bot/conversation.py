@@ -37,6 +37,7 @@ class ConversationState:
     last_error: str | None = None
     submission_attempts: int = 0
     next_retry_at: str | None = None
+    alert_sent: bool = False
 
 
 ADDRESS_FALLBACK = "Точный адрес склада уточнит координатор после записи."

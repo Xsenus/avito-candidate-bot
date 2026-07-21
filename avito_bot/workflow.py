@@ -111,3 +111,5 @@ def mark_invitation_sent(state: ConversationState) -> None:
     state.step = "done"
     state.last_error = None
     state.next_retry_at = None
+    state.submission_attempts = 0
+    state.alert_sent = False

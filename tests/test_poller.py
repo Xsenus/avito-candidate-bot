@@ -10,6 +10,7 @@ from poller import (
     process_chat_message,
     reconcile_incomplete_applications,
     restore_collected_fields,
+    schedule_retry,
 )
 
 
@@ -397,4 +398,46 @@ def test_complete_candidate_journey_survives_state_reload(tmp_path, monkeypatch)
     assert client.messages[-1][1] == "Приглашение на 23.07.2026, Кемерово"
     assert len(delayed) == 1
     assert all(store.is_processed("chat-journey", f"message-{i}") for i in range(1, 7))
+    store.close()
+
+
+def test_retries_emit_one_alert_then_stop(tmp_path, monkeypatch, capsys):
+    store = SQLiteStateStore(tmp_path / "retries.sqlite3")
+    state = ConversationState(
+        step="ready_to_submit",
+        application_status="pending",
+    )
+    monkeypatch.setenv("APPLICATION_ALERT_AFTER_ATTEMPTS", "2")
+    monkeypatch.setenv("APPLICATION_MAX_RETRIES", "3")
+
+    schedule_retry(store, "chat-retry", state, RuntimeError("temporary"))
+    assert state.application_status == "pending"
+    assert "ALERT" not in capsys.readouterr().out
+
+    schedule_retry(store, "chat-retry", state, RuntimeError("temporary"))
+    assert "ALERT repeated application failure" in capsys.readouterr().out
+
+    schedule_retry(store, "chat-retry", state, RuntimeError("temporary"))
+    assert state.application_status == "submission_retry_exhausted"
+    assert state.next_retry_at is None
+    assert "ALERT application retries exhausted" in capsys.readouterr().out
+    assert store.pending() == []
+    store.close()
+
+
+def test_exhausted_invitation_retry_preserves_submitted_form_status(
+    tmp_path, monkeypatch
+):
+    store = SQLiteStateStore(tmp_path / "invitation-retries.sqlite3")
+    state = ConversationState(
+        step="ready_to_submit",
+        application_status="submitted",
+    )
+    monkeypatch.setenv("APPLICATION_MAX_RETRIES", "1")
+
+    schedule_retry(store, "chat-invitation", state, RuntimeError("Avito unavailable"))
+
+    assert state.application_status == "invitation_retry_exhausted"
+    assert state.next_retry_at is None
+    assert store.pending() == []
     store.close()
