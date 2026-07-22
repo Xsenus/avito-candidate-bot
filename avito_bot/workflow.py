@@ -6,6 +6,7 @@ from typing import Callable, Protocol
 from .conversation import ConversationState
 from .invitations import GoogleSheetInvitationSource
 from .service_centers import (
+    ServiceCenterSelection,
     form_option_for,
     parse_service_center_overrides,
     resolve_service_center,
@@ -65,12 +66,18 @@ class CandidateWorkflow:
             )
 
         catalog = self.invitation_source.load()
-        selection = resolve_service_center(
-            state.city,
-            state.item_id,
-            catalog,
-            self.service_center_overrides,
-        )
+        if state.service_center and state.warehouse_selection_source == "candidate":
+            selected_template = catalog.find(state.service_center)
+            selection = ServiceCenterSelection(
+                selected_template.service_center.removeprefix("СЦ ").strip()
+            )
+        else:
+            selection = resolve_service_center(
+                state.city,
+                state.item_id,
+                catalog,
+                self.service_center_overrides,
+            )
         state.service_center = selection.name
 
         if state.application_status != "submitted":

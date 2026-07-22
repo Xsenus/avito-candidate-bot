@@ -45,7 +45,33 @@ def test_invitation_replaces_date_marker():
     invitation = template.render(date(2026, 7, 28))
 
     assert "ДАТА" not in invitation
-    assert "28.07.2026" in invitation
+    assert "28.07." in invitation
+    assert "Что взять с собой:" in invitation
+    assert "Заряженный смартфон" in invitation
+    assert invitation.endswith("До встречи!")
+
+
+def test_invitation_does_not_duplicate_existing_footer():
+    catalog = InvitationCatalog.from_csv(
+        '"СЦ","Текст сообщения"\n'
+        '"Кемерово","Приходите ДАТА. Что взять с собой: паспорт"\n'
+    )
+
+    invitation = catalog.find("Кемерово").render("23.07.2026")
+
+    assert invitation.count("Что взять с собой:") == 1
+    assert "23.07.." not in invitation
+
+
+def test_questions_line_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("INVITATION_INCLUDE_QUESTIONS_LINE", "true")
+    template = InvitationCatalog.from_csv(SAMPLE_CSV).find("Новосибирск")
+
+    invitation = template.render("28.07.2026")
+
+    assert invitation.endswith(
+        "Остались вопросы? Пишите здесь или уточните уже на стажировке."
+    )
 
 
 def test_catalog_rejects_invitation_without_date_marker():

@@ -8,6 +8,7 @@ from typing import Any
 
 from .avito_client import AvitoClient
 from .candidate import normalize_phone, resolve_internship_date, split_full_name
+from .warehouses import parse_warehouse_choice, warehouse_prompt_for_city
 
 
 @dataclass
@@ -21,6 +22,8 @@ class ConversationState:
     city: str | None = None
     item_id: str | None = None
     service_center: str | None = None
+    warehouse_choice: int | None = None
+    warehouse_selection_source: str | None = None
     address: str | None = None
     date_time: str | None = None
     internship_date: str | None = None
@@ -142,7 +145,7 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
 
     if asks_for_address(cleaned):
         state.city = normalize_city(city_hint) or state.city
-        address = resolve_address(state.city)
+        address = state.address or resolve_address(state.city)
         state.address = address
         return WAREHOUSE_ADDRESS_MESSAGE.format(address=address)
 
@@ -157,18 +160,43 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
         return INTERNSHIP_MESSAGE
 
     if state.step == "awaiting_staj":
+        warehouse_prompt = warehouse_prompt_for_city(city_hint or state.city)
+        if warehouse_prompt and (is_positive(cleaned) or looks_like_datetime(cleaned)):
+            state.city = normalize_city(city_hint) or state.city
+            state.step = "awaiting_warehouse"
+            return warehouse_prompt
         if looks_like_datetime(cleaned):
             state.date_time = text.strip()
             state.internship_date = resolve_internship_date(text).strftime("%d.%m.%Y")
             state.step = "awaiting_full_name"
             return CONFIRMATION_MESSAGE
         if is_positive(cleaned):
-            state.step = "awaiting_arrival"
+            state.step = "awaiting_datetime"
             state.city = normalize_city(city_hint) or state.city
             address = resolve_address(state.city)
             state.address = address
             return ADDRESS_MESSAGE.format(address=address)
         return "Готовы пройти стажировку?"
+
+    if state.step == "awaiting_warehouse":
+        state.city = normalize_city(city_hint) or state.city
+        prompt = warehouse_prompt_for_city(state.city)
+        choice = parse_warehouse_choice(text, state.city)
+        if choice == 0:
+            state.step = "done"
+            state.application_status = "cancelled"
+            return "Понял, заявку отменил. Если планы изменятся — напишите нам."
+        if choice is None:
+            return (
+                "Не удалось определить склад. Укажите номер из списка.\n\n"
+                f"{prompt or ''}"
+            ).strip()
+        state.warehouse_choice = choice.number
+        state.warehouse_selection_source = "candidate"
+        state.service_center = choice.service_center
+        state.address = choice.address
+        state.step = "awaiting_datetime"
+        return ADDRESS_MESSAGE
 
     if state.step == "awaiting_arrival":
         if looks_like_datetime(cleaned):

@@ -64,7 +64,8 @@ def test_form_is_confirmed_before_invitation_is_returned():
     assert statuses == ["submitting", "submitted"]
     assert form.applications[0].warehouse == "СЦ Кемерово"
     assert form.applications[0].phone == "+79272069701"
-    assert invitation == "Вы записаны 23.07.2026 на склад в Кемерово"
+    assert invitation.startswith("Вы записаны 23.07. на склад в Кемерово")
+    assert invitation.endswith("До встречи!")
 
 
 def test_submitted_form_is_not_sent_twice_when_invitation_is_retried():
@@ -107,7 +108,30 @@ def test_rostov_uses_different_form_and_invitation_names():
     invitation = workflow.complete(state)
 
     assert form.applications[0].warehouse == "СЦ Ростов-на-Дону"
-    assert invitation == "Приглашение Ростов 23.07.2026"
+    assert invitation.startswith("Приглашение Ростов 23.07.")
+
+
+class SelectedWarehouseInvitationSource:
+    def load(self):
+        return InvitationCatalog.from_csv(
+            '"СЦ","Текст сообщения"\n'
+            '"Печатники","Приглашение Печатники ДАТА"\n'
+        )
+
+
+def test_candidate_selected_warehouse_has_priority_over_listing_city():
+    form = FakeForm()
+    workflow = CandidateWorkflow(form, SelectedWarehouseInvitationSource())
+    state = ready_state()
+    state.city = "Москва"
+    state.service_center = "Печатники"
+    state.warehouse_choice = 4
+    state.warehouse_selection_source = "candidate"
+
+    invitation = workflow.complete(state)
+
+    assert form.applications[0].warehouse == "СЦ Печатники"
+    assert invitation.startswith("Приглашение Печатники 23.07.")
 
 
 def test_unknown_submit_result_is_not_automatically_retried():

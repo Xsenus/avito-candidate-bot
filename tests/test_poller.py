@@ -498,7 +498,8 @@ def test_phone_triggers_form_then_invitation_and_persists_completion(tmp_path):
     restored = store.load("chat-1")
     assert form.applications[0].phone == "+79272069701"
     assert client.messages[0][1].startswith("Спасибо, данные получили")
-    assert client.messages[1][1] == "Приглашение на 23.07.2026, Кемерово"
+    assert client.messages[1][1].startswith("Приглашение на 23.07., Кемерово")
+    assert client.messages[1][1].endswith("До встречи!")
     assert restored.application_status == "completed"
     assert restored.step == "done"
     assert store.is_processed("chat-1", "message-1")
@@ -556,9 +557,64 @@ def test_complete_candidate_journey_survives_state_reload(tmp_path, monkeypatch)
     assert form.applications[0].warehouse == "СЦ Кемерово"
     assert form.applications[0].tariff == "Драйв"
     assert form.applications[0].citizenship == "Российская Федерация"
-    assert client.messages[-1][1] == "Приглашение на 23.07.2026, Кемерово"
+    assert client.messages[-1][1].startswith("Приглашение на 23.07., Кемерово")
+    assert client.messages[-1][1].endswith("До встречи!")
     assert len(delayed) == 1
     assert all(store.is_processed("chat-journey", f"message-{i}") for i in range(1, 7))
+    store.close()
+
+
+def test_moscow_journey_persists_selected_warehouse_and_uses_it_in_form(
+    tmp_path, monkeypatch
+):
+    class MoscowInvitationSource:
+        def load(self):
+            return InvitationCatalog.from_csv(
+                '"СЦ","Текст сообщения"\n'
+                '"Печатники","Вы записаны ДАТА на склад Печатники"\n'
+            )
+
+    store = SQLiteStateStore(tmp_path / "moscow-journey.sqlite3")
+    client = FakeClient()
+    form = FakeForm()
+    workflow = CandidateWorkflow(form, MoscowInvitationSource())
+    monkeypatch.setattr("poller.schedule_delayed_message", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "avito_bot.conversation.resolve_internship_date",
+        lambda value: __import__("datetime").date(2026, 7, 23),
+    )
+
+    answers = [
+        "Здравствуйте",
+        "Да",
+        "Да",
+        "4",
+        "четверг",
+        "Иванов Иван",
+        "8 999 123-45-67",
+    ]
+    for index, answer in enumerate(answers, start=1):
+        process_chat_message(
+            client,
+            workflow,
+            store,
+            "chat-moscow",
+            store.load("chat-moscow"),
+            {"content": {"text": answer}},
+            f"moscow-message-{index}",
+            "Москва",
+            "moscow-item",
+        )
+
+    restored = store.load("chat-moscow")
+    assert restored.step == "done"
+    assert restored.application_status == "completed"
+    assert restored.warehouse_choice == 4
+    assert restored.warehouse_selection_source == "candidate"
+    assert restored.service_center == "Печатники"
+    assert restored.address == "Курьяновская набережная, 6с2"
+    assert form.applications[0].warehouse == "СЦ Печатники"
+    assert client.messages[-1][1].startswith("Вы записаны 23.07. на склад Печатники")
     store.close()
 
 
