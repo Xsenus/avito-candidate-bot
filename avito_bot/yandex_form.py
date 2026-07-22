@@ -327,11 +327,7 @@ class YandexFormSubmitter:
             dialog.get_by_role("button", name="Вперёд", exact=True).click()
 
         label = self._russian_date_label(target)
-        target_button = dialog.get_by_role("button", name=label, exact=True)
-        if target_button.count() != 1:
-            raise FormSubmissionError(
-                f"В календаре не найдена дата «{label}»"
-            )
+        target_button = self._wait_for_unique_date_button(page, dialog, label)
         target_button.click()
 
         date_input = page.get_by_role("combobox", name="ДД.ММ.ГГГГ")
@@ -341,6 +337,24 @@ class YandexFormSubmitter:
             raise FormSubmissionError(
                 f"Поле даты не приняло значение {value!r}: получено {date_input.input_value()!r}"
             )
+
+    def _wait_for_unique_date_button(self, page, dialog, label: str):
+        """Wait until Yandex calendar finishes its month-slide animation.
+
+        During the transition Yandex temporarily keeps both month grids in the
+        DOM. The same accessible date label is therefore present twice: once as
+        an out-of-month day and once in the active month. Clicking immediately
+        used to reject otherwise valid dates in the next month.
+        """
+        target_button = dialog.get_by_role("button", name=label, exact=True)
+        wait_limit_ms = min(self.timeout_ms, 5_000)
+        waited_ms = 0
+        while target_button.count() != 1 and waited_ms < wait_limit_ms:
+            page.wait_for_timeout(100)
+            waited_ms += 100
+        if target_button.count() != 1:
+            raise FormSubmissionError(f"В календаре не найдена дата «{label}»")
+        return target_button
 
     @staticmethod
     def _russian_date_label(value: date) -> str:

@@ -56,6 +56,46 @@ def test_calendar_accessible_label_matches_yandex_format():
     )
 
 
+class AnimatedDateButton:
+    def __init__(self):
+        self.counts = iter((2, 2, 1, 1))
+
+    def count(self):
+        return next(self.counts)
+
+
+class AnimatedCalendarDialog:
+    def __init__(self, button):
+        self.button = button
+
+    def get_by_role(self, role, *, name, exact):
+        assert role == "button"
+        assert name == "вторник, 4 августа 2026 г."
+        assert exact is True
+        return self.button
+
+
+class AnimationPage:
+    def __init__(self):
+        self.waits = []
+
+    def wait_for_timeout(self, milliseconds):
+        self.waits.append(milliseconds)
+
+
+def test_calendar_waits_until_month_animation_removes_duplicate_date():
+    button = AnimatedDateButton()
+    dialog = AnimatedCalendarDialog(button)
+    page = AnimationPage()
+
+    result = YandexFormSubmitter("https://forms.yandex.ru/example")._wait_for_unique_date_button(
+        page, dialog, "вторник, 4 августа 2026 г."
+    )
+
+    assert result is button
+    assert page.waits == [100, 100]
+
+
 def test_intercepted_submission_contains_candidate_fields():
     payload = {
         "values": {
