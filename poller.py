@@ -291,6 +291,8 @@ def initialize_message_cursor(
                     messages[: (prompt_index or 0) + 1],
                 )
                 state.step = inferred_step
+                if inferred_step == "done":
+                    state.application_status = "completed"
                 state.city = city or state.city
                 state.item_id = item_id or state.item_id
                 store.save(chat_id, state)
@@ -319,6 +321,8 @@ def infer_step_from_bot_message(text: str | None) -> str | None:
         return "awaiting_full_name"
     if normalized == "И номер":
         return "awaiting_phone"
+    if normalized.startswith("Готово, вы записаны!"):
+        return "done"
     return None
 
 
@@ -458,6 +462,11 @@ def process_chat_message(
 
     if state.application_status in {"pending", "submitted"}:
         complete_pending_application(client, workflow, store, chat_id, state)
+    print(
+        f"message processed chat_id={chat_id} message_id={message_id} "
+        f"reply_sent={bool(reply)} step={state.step} "
+        f"application_status={state.application_status}"
+    )
 
 
 def main() -> None:

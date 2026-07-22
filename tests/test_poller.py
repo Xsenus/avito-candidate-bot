@@ -186,7 +186,37 @@ def test_known_bot_prompts_map_to_expected_steps():
     assert infer_step_from_bot_message(INTERNSHIP_MESSAGE) == "awaiting_staj"
     assert infer_step_from_bot_message(ADDRESS_MESSAGE) == "awaiting_datetime"
     assert infer_step_from_bot_message("И номер") == "awaiting_phone"
+    assert (
+        infer_step_from_bot_message(
+            "Готово, вы записаны! Пришлю вам сюда в чат адрес в течении 30 минут."
+        )
+        == "done"
+    )
     assert infer_step_from_bot_message("ручное сообщение") is None
+
+
+def test_bootstrap_marks_legacy_completed_chat_terminal(tmp_path):
+    store = SQLiteStateStore(tmp_path / "legacy-completed.sqlite3")
+    final_message = {
+        "id": "legacy-final",
+        "created": 100,
+        "direction": "out",
+        "type": "text",
+        "content": {
+            "text": "Готово, вы записаны! Пришлю вам сюда в чат адрес в течении 30 минут."
+        },
+    }
+    existing_chat = chat(direction="out")
+    existing_chat["last_message"] = final_message
+
+    initialize_message_cursor(
+        FakeHistoryClient([final_message]), store, [existing_chat]
+    )
+
+    restored = store.load("chat-1")
+    assert restored.step == "done"
+    assert restored.application_status == "completed"
+    store.close()
 
 
 def test_legacy_history_restores_date_name_and_phone():
