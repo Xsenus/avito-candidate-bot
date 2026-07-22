@@ -6,7 +6,9 @@ from poller import (
     extract_chat_context,
     infer_step_from_bot_message,
     initialize_message_cursor,
+    is_job_application_system_message,
     iter_new_chat_messages,
+    iter_unanswered_job_applications,
     migrate_legacy_completed_chats,
     process_chat_message,
     reconcile_incomplete_applications,
@@ -49,6 +51,100 @@ def test_only_incoming_unprocessed_messages_are_yielded(tmp_path):
     assert len(list(iter_new_chat_messages(outgoing_client, [outgoing], store))) == 0
     store.mark_processed("chat-1", "message-1")
     assert len(list(iter_new_chat_messages(incoming_client, [incoming], store))) == 0
+    store.close()
+
+
+def job_application_message(message_id, created, flow_id):
+    return {
+        "id": message_id,
+        "created": created,
+        "direction": "in",
+        "type": "system",
+        "content": {"text": "system application", "flow_id": flow_id},
+    }
+
+
+def test_new_job_application_system_pair_starts_only_once(tmp_path):
+    store = SQLiteStateStore(tmp_path / "system-application.sqlite3")
+    messages = [
+        job_application_message("enrichment", 200, "job_apply_enrichment"),
+        job_application_message("job", 100, "job"),
+    ]
+    candidate_chat = chat()
+    candidate_chat["last_message"] = messages[0]
+
+    yielded = list(
+        iter_new_chat_messages(FakeHistoryClient(messages), [candidate_chat], store)
+    )
+
+    assert [values[3] for values in yielded] == ["enrichment"]
+    assert is_job_application_system_message(messages[0])
+    assert store.is_processed("chat-1", "job")
+    store.close()
+
+
+def test_unrelated_system_message_is_ignored(tmp_path):
+    store = SQLiteStateStore(tmp_path / "unrelated-system.sqlite3")
+    message = job_application_message("unrelated", 100, "some_other_flow")
+    candidate_chat = chat()
+    candidate_chat["last_message"] = message
+
+    assert not list(
+        iter_new_chat_messages(
+            FakeHistoryClient([message]), [candidate_chat], store
+        )
+    )
+    assert store.is_processed("chat-1", "unrelated")
+    store.close()
+
+
+def test_recent_unanswered_application_can_be_recovered(tmp_path):
+    from datetime import datetime, timezone
+
+    store = SQLiteStateStore(tmp_path / "recover-system.sqlite3")
+    message = job_application_message("enrichment", 1_000, "job_apply_enrichment")
+    candidate_chat = chat()
+    candidate_chat["last_message"] = message
+    store.mark_message_seen("chat-1", "enrichment", 1_000)
+
+    recovered = list(
+        iter_unanswered_job_applications(
+            FakeHistoryClient([message]),
+            [candidate_chat],
+            store,
+            now=datetime.fromtimestamp(1_100, timezone.utc),
+        )
+    )
+
+    assert [values[3] for values in recovered] == ["enrichment"]
+    store.close()
+
+
+def test_recovery_skips_chat_with_an_outgoing_reply(tmp_path):
+    from datetime import datetime, timezone
+
+    store = SQLiteStateStore(tmp_path / "recover-replied.sqlite3")
+    messages = [
+        {
+            "id": "reply",
+            "created": 1_100,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": "already answered"},
+        },
+        job_application_message("job", 1_000, "job"),
+    ]
+    candidate_chat = chat(direction="out")
+    candidate_chat["last_message"] = messages[0]
+
+    assert not list(
+        iter_unanswered_job_applications(
+            FakeHistoryClient(messages),
+            [candidate_chat],
+            store,
+            now=datetime.fromtimestamp(1_200, timezone.utc),
+        )
+    )
     store.close()
 
 

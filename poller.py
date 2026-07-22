@@ -34,6 +34,18 @@ from avito_bot.yandex_form import FormConfigurationError, YandexFormSubmitter
 load_dotenv()
 
 CHAT_PAGE_LIMIT = 100
+JOB_APPLICATION_FLOW_IDS = frozenset({"job", "job_apply_enrichment"})
+
+
+def is_job_application_system_message(message: dict[str, Any]) -> bool:
+    """Return whether Avito is announcing a new vacancy application."""
+    if message.get("direction") != "in" or message.get("type") != "system":
+        return False
+    content = message.get("content") or {}
+    return (
+        isinstance(content, dict)
+        and str(content.get("flow_id") or "").strip() in JOB_APPLICATION_FLOW_IDS
+    )
 
 
 def iter_new_chat_messages(
@@ -54,6 +66,15 @@ def iter_new_chat_messages(
         city, item_id = extract_chat_context(chat)
         state = store.load(chat_id)
         messages = oldest_first(client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT))
+        latest_job_application_id = next(
+            (
+                str(message.get("id") or "").strip()
+                for message in reversed(messages)
+                if is_job_application_system_message(message)
+                and str(message.get("id") or "").strip()
+            ),
+            None,
+        )
         cursor = store.get_message_cursor(chat_id)
         only_last_message = False
 
@@ -91,7 +112,26 @@ def iter_new_chat_messages(
             if terminal:
                 store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
-            if message.get("direction") != "in" or message.get("type") != "text":
+            if message.get("direction") != "in":
+                store.mark_message_seen(chat_id, message_id, key[0] if key else None)
+                continue
+
+            if message.get("type") == "system":
+                # Avito emits two system events for one vacancy response. Use
+                # only the newest event and only to start a fresh conversation.
+                if (
+                    message_id != latest_job_application_id
+                    or state.step != "idle"
+                    or not is_job_application_system_message(message)
+                ):
+                    store.mark_message_seen(
+                        chat_id, message_id, key[0] if key else None
+                    )
+                    continue
+                yield chat_id, state, message, message_id, city, item_id
+                continue
+
+            if message.get("type") != "text":
                 store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
 
@@ -101,6 +141,56 @@ def iter_new_chat_messages(
                 store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
             yield chat_id, state, message, message_id, city, item_id
+
+
+def iter_unanswered_job_applications(
+    client: AvitoClient,
+    chats: list[dict[str, Any]],
+    store: SQLiteStateStore,
+    *,
+    now: datetime | None = None,
+    max_age_hours: int = 24,
+) -> Iterator[tuple[str, ConversationState, dict[str, Any], str, str | None, str | None]]:
+    """Find recent application chats that have never received an outgoing text."""
+    current = now or datetime.now(timezone.utc)
+    cutoff = current.timestamp() - max(1, max_age_hours) * 3600
+    for chat in chats:
+        chat_id = str(chat.get("id") or "").strip()
+        if not chat_id:
+            continue
+        state = store.load(chat_id)
+        if state.step != "idle" or state.application_status != "collecting":
+            continue
+
+        messages = oldest_first(client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT))
+        triggers = [
+            message
+            for message in messages
+            if is_job_application_system_message(message)
+            and (normalized_created(message) or 0) >= cutoff
+        ]
+        if not triggers:
+            continue
+        if any(
+            message.get("direction") == "out" and message.get("type") == "text"
+            for message in messages
+        ):
+            continue
+
+        later_texts = [
+            message
+            for message in messages
+            if message.get("direction") == "in"
+            and message.get("type") == "text"
+            and (normalized_created(message) or 0)
+            >= (normalized_created(triggers[-1]) or 0)
+        ]
+        message = later_texts[-1] if later_texts else triggers[-1]
+        message_id = str(message.get("id") or "").strip()
+        if not message_id:
+            continue
+        city, item_id = extract_chat_context(chat)
+        yield chat_id, state, message, message_id, city, item_id
 
 
 def normalized_created(message: dict[str, Any]) -> float | None:
