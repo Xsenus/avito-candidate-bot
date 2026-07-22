@@ -53,32 +53,70 @@ def iter_new_chat_messages(
 
         city, item_id = extract_chat_context(chat)
         state = store.load(chat_id)
-        messages = client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT)
+        messages = oldest_first(client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT))
+        cursor = store.get_message_cursor(chat_id)
+        only_last_message = False
 
-        # An old dialog can appear in the unread feed for the first time after a
-        # candidate sends one new message. Its earlier, already-read history was
-        # never part of our startup page and must not be replayed. In that case
-        # establish a cursor at the current last message and process only it.
-        if not store.has_seen_chat(chat_id):
-            for historical in messages:
-                historical_id = str(historical.get("id") or "").strip()
-                if historical_id and historical_id != last_message_id:
-                    store.mark_processed(chat_id, historical_id)
+        # Migrate databases created before per-chat cursors existed. A fetched
+        # processed message is a reliable watermark; unprocessed messages older
+        # than it are history. With no matching processed message, fail closed
+        # and only consider Avito's current last message.
+        if cursor is None:
+            processed_keys = [
+                key
+                for message in messages
+                if (key := message_key(message)) is not None
+                and store.is_processed(chat_id, str(message.get("id") or "").strip())
+            ]
+            if processed_keys:
+                cursor = max(processed_keys)
+            else:
+                only_last_message = True
 
-        for message in oldest_first(messages):
+        terminal = state.application_status == "completed" or state.step == "done"
+        for message in messages:
             message_id = str(message.get("id") or "").strip()
             if not message_id or store.is_processed(chat_id, message_id):
                 continue
+            key = message_key(message)
+            if only_last_message and message_id != last_message_id:
+                store.mark_message_seen(chat_id, message_id, key[0] if key else None)
+                continue
+            if key is None and message_id != last_message_id:
+                store.mark_message_seen(chat_id, message_id, None)
+                continue
+            if key is not None and cursor is not None and key <= cursor:
+                store.mark_message_seen(chat_id, message_id, key[0] if key else None)
+                continue
+            if terminal:
+                store.mark_message_seen(chat_id, message_id, key[0] if key else None)
+                continue
             if message.get("direction") != "in" or message.get("type") != "text":
-                store.mark_processed(chat_id, message_id)
+                store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
 
             content = message.get("content") or {}
             text = content.get("text") if isinstance(content, dict) else None
             if not isinstance(text, str) or not text.strip():
-                store.mark_processed(chat_id, message_id)
+                store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
             yield chat_id, state, message, message_id, city, item_id
+
+
+def normalized_created(message: dict[str, Any]) -> float | None:
+    created = message.get("created")
+    if not isinstance(created, (int, float)):
+        return None
+    value = float(created)
+    if value > 10_000_000_000:
+        value /= 1000
+    return value
+
+
+def message_key(message: dict[str, Any]) -> tuple[float, str] | None:
+    created = normalized_created(message)
+    message_id = str(message.get("id") or "").strip()
+    return (created, message_id) if created is not None and message_id else None
 
 
 def oldest_first(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -261,7 +299,9 @@ def initialize_message_cursor(
                 message_id = str(message.get("id") or "").strip()
                 if not message_id:
                     continue
-                store.mark_processed(chat_id, message_id)
+                store.mark_message_seen(
+                    chat_id, message_id, normalized_created(message)
+                )
                 count += 1
         print(f"Bootstrap: skipped {count} existing messages")
     store.set_metadata(cursor_key, "true")
@@ -414,7 +454,7 @@ def process_chat_message(
             schedule_delayed_message(client, chat_id, FOLLOW_UP_MESSAGE, delay=delay)
 
     store.save(chat_id, state)
-    store.mark_processed(chat_id, message_id)
+    store.mark_message_seen(chat_id, message_id, normalized_created(message))
 
     if state.application_status in {"pending", "submitted"}:
         complete_pending_application(client, workflow, store, chat_id, state)
@@ -476,10 +516,14 @@ def main() -> None:
             chats = client.get_chats(
                 unread_only=True, limit=CHAT_PAGE_LIMIT
             )
+            failed_chats: set[str] = set()
             for values in iter_new_chat_messages(client, chats, store):
+                if values[0] in failed_chats:
+                    continue
                 try:
                     process_chat_message(client, workflow, store, *values)
                 except Exception as exc:
+                    failed_chats.add(values[0])
                     print(f"message error chat_id={values[0]}: {exc}")
 
             for chat_id, state in store.pending():

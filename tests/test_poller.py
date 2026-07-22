@@ -64,6 +64,7 @@ class FakeHistoryClient:
 def test_rapid_name_and_phone_messages_are_yielded_oldest_first(tmp_path):
     store = SQLiteStateStore(tmp_path / "rapid.sqlite3")
     store.save("chat-1", ConversationState(step="awaiting_full_name"))
+    store.mark_message_seen("chat-1", "previously-processed", 50)
     messages = [
         {
             "id": "message-phone",
@@ -440,4 +441,71 @@ def test_exhausted_invitation_retry_preserves_submitted_form_status(
     assert state.application_status == "invitation_retry_exhausted"
     assert state.next_retry_at is None
     assert store.pending() == []
+    store.close()
+
+
+def test_partially_seen_chat_does_not_replay_older_unprocessed_history(tmp_path):
+    store = SQLiteStateStore(tmp_path / "partial.sqlite3")
+    store.save("chat-1", ConversationState(step="awaiting_datetime"))
+    store.mark_processed("chat-1", "known-watermark")
+    messages = [
+        {
+            "id": "new-system-event",
+            "created": 300,
+            "direction": "in",
+            "type": "system",
+            "content": {},
+        },
+        {
+            "id": "known-watermark",
+            "created": 200,
+            "direction": "in",
+            "type": "system",
+            "content": {},
+        },
+        {
+            "id": "old-unprocessed-answer",
+            "created": 100,
+            "direction": "in",
+            "type": "text",
+            "content": {"text": "old answer"},
+        },
+    ]
+    candidate_chat = chat()
+    candidate_chat["last_message"] = messages[0]
+
+    yielded = list(
+        iter_new_chat_messages(FakeHistoryClient(messages), [candidate_chat], store)
+    )
+
+    assert yielded == []
+    assert store.is_processed("chat-1", "old-unprocessed-answer")
+    assert store.is_processed("chat-1", "new-system-event")
+    assert store.get_message_cursor("chat-1") == (300.0, "new-system-event")
+    store.close()
+
+
+def test_completed_chat_never_restarts_from_a_new_message(tmp_path):
+    store = SQLiteStateStore(tmp_path / "completed.sqlite3")
+    store.save(
+        "chat-1", ConversationState(step="done", application_status="completed")
+    )
+    store.mark_message_seen("chat-1", "old-message", 100)
+    current = chat()
+    current["last_message"] = {
+        "id": "new-message",
+        "created": 200,
+        "direction": "in",
+        "type": "text",
+        "content": {"text": "hello again"},
+    }
+
+    yielded = list(
+        iter_new_chat_messages(
+            FakeHistoryClient([current["last_message"]]), [current], store
+        )
+    )
+
+    assert yielded == []
+    assert store.is_processed("chat-1", "new-message")
     store.close()

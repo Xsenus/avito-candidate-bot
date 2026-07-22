@@ -44,6 +44,16 @@ class SQLiteStateStore:
             )
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_message_cursors (
+                chat_id TEXT PRIMARY KEY,
+                last_created REAL NOT NULL,
+                last_message_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         self._connection.commit()
 
     def load(self, chat_id: str) -> ConversationState:
@@ -100,6 +110,52 @@ class SQLiteStateStore:
                 "INSERT OR IGNORE INTO processed_messages(chat_id, message_id) VALUES (?, ?)",
                 (chat_id, message_id),
             )
+            self._connection.commit()
+
+    def get_message_cursor(self, chat_id: str) -> tuple[float, str] | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT last_created, last_message_id
+                FROM chat_message_cursors
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+        return (float(row[0]), str(row[1])) if row else None
+
+    def mark_message_seen(
+        self, chat_id: str, message_id: str, created: float | None
+    ) -> None:
+        """Atomically mark a message and move the per-chat high-water mark."""
+        with self._lock:
+            self._connection.execute(
+                "INSERT OR IGNORE INTO processed_messages(chat_id, message_id) VALUES (?, ?)",
+                (chat_id, message_id),
+            )
+            if created is not None:
+                current = self._connection.execute(
+                    """
+                    SELECT last_created, last_message_id
+                    FROM chat_message_cursors
+                    WHERE chat_id = ?
+                    """,
+                    (chat_id,),
+                ).fetchone()
+                candidate = (float(created), message_id)
+                if current is None or candidate > (float(current[0]), str(current[1])):
+                    self._connection.execute(
+                        """
+                        INSERT INTO chat_message_cursors(
+                            chat_id, last_created, last_message_id, updated_at
+                        ) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(chat_id) DO UPDATE SET
+                            last_created = excluded.last_created,
+                            last_message_id = excluded.last_message_id,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (chat_id, float(created), message_id),
+                    )
             self._connection.commit()
 
     def pending(self) -> list[tuple[str, ConversationState]]:
