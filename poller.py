@@ -14,6 +14,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from avito_bot.avito_client import AvitoClient
+from avito_bot.alerts import emit_alert
 from avito_bot.conversation import (
     ADDRESS_MESSAGE,
     CONFIRMATION_MESSAGE,
@@ -170,8 +171,8 @@ def schedule_retry(
         state.next_retry_at = None
         state.alert_sent = True
         store.save(chat_id, state)
-        print(
-            "ALERT application retries exhausted "
+        emit_alert(
+            "application retries exhausted "
             f"chat_id={chat_id} attempts={state.submission_attempts} error={error}"
         )
         return
@@ -182,8 +183,8 @@ def schedule_retry(
     ).isoformat()
     if state.submission_attempts >= alert_after and not state.alert_sent:
         state.alert_sent = True
-        print(
-            "ALERT repeated application failure "
+        emit_alert(
+            "repeated application failure "
             f"chat_id={chat_id} attempts={state.submission_attempts} error={error}"
         )
     store.save(chat_id, state)
@@ -206,8 +207,8 @@ def pause_application(
     state.next_retry_at = None
     state.alert_sent = True
     store.save(chat_id, state)
-    print(
-        "ALERT application paused due to configuration error "
+    emit_alert(
+        "application paused due to configuration error "
         f"chat_id={chat_id} attempts={state.submission_attempts} error={error}"
     )
 
