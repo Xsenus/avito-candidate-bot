@@ -648,6 +648,12 @@ def main() -> None:
         print(f"Failed to initialize message cursor: {exc}")
         return
 
+    consecutive_poll_errors = 0
+    processed_since_health = 0
+    health_interval = max(
+        60, int(os.getenv("HEALTH_LOG_INTERVAL_SECONDS", "300"))
+    )
+    next_health_log = time.monotonic() + health_interval
     while True:
         try:
             # A recruiter can open a chat before the next polling cycle. Avito
@@ -663,14 +669,33 @@ def main() -> None:
                     continue
                 try:
                     process_chat_message(client, workflow, store, *values)
+                    processed_since_health += 1
                 except Exception as exc:
                     failed_chats.add(values[0])
                     print(f"message error chat_id={values[0]}: {exc}")
 
             for chat_id, state in store.pending():
                 complete_pending_application(client, workflow, store, chat_id, state)
+            consecutive_poll_errors = 0
         except Exception as exc:
+            consecutive_poll_errors += 1
             print(f"poller error: {exc}")
+            alert_after = max(
+                1, int(os.getenv("POLL_ERROR_ALERT_AFTER_ATTEMPTS", "3"))
+            )
+            if consecutive_poll_errors == alert_after:
+                emit_alert(
+                    "poller repeatedly failed "
+                    f"attempts={consecutive_poll_errors} error={exc}"
+                )
+        if time.monotonic() >= next_health_log:
+            print(
+                "poller health OK "
+                f"processed_since_last={processed_since_health} "
+                f"consecutive_errors={consecutive_poll_errors}"
+            )
+            processed_since_health = 0
+            next_health_log = time.monotonic() + health_interval
         time.sleep(interval)
 
 

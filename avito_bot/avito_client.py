@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -14,6 +15,7 @@ class AvitoClient:
         self.user_id = self._normalize_user_id(user_id)
         self.base_url = self._normalize_base_url(base_url)
         self._access_token: str | None = None
+        self._access_token_expires_at: float | None = None
 
     @staticmethod
     def _normalize_value(value: str) -> str:
@@ -36,10 +38,17 @@ class AvitoClient:
         return "https://api.avito.ru"
 
     def get_access_token(self) -> str:
-        if self._access_token:
+        if (
+            self._access_token
+            and (
+                self._access_token_expires_at is None
+                or time.monotonic() < self._access_token_expires_at
+            )
+        ):
             return self._access_token
 
-        response = requests.post(
+        response = self._request_with_retries(
+            requests.post,
             f"{self.base_url}/token",
             data={
                 "grant_type": "client_credentials",
@@ -59,6 +68,19 @@ class AvitoClient:
         self._access_token = payload.get("access_token")
         if not self._access_token:
             raise RuntimeError("Avito token was not returned")
+        try:
+            expires_in = float(payload.get("expires_in"))
+        except (TypeError, ValueError):
+            expires_in = 0
+        if expires_in > 0:
+            margin = max(
+                0, int(os.getenv("AVITO_TOKEN_REFRESH_MARGIN_SECONDS", "60"))
+            )
+            self._access_token_expires_at = time.monotonic() + max(
+                1, expires_in - margin
+            )
+        else:
+            self._access_token_expires_at = None
         return self._access_token
 
     def send_message(self, chat_id: str, text: str) -> dict[str, Any]:
@@ -127,12 +149,62 @@ class AvitoClient:
         return messages if isinstance(messages, list) else []
 
     def _authorized_request(self, method: str, url: str, **kwargs):
-        for attempt in range(2):
+        base_headers = dict(kwargs.pop("headers", {}))
+        max_attempts = max(2, int(os.getenv("AVITO_HTTP_MAX_ATTEMPTS", "3")))
+        for attempt in range(max_attempts):
             token = self.get_access_token()
-            headers = dict(kwargs.pop("headers", {}))
+            headers = dict(base_headers)
             headers["Authorization"] = f"Bearer {token}"
-            response = requests.request(method, url, headers=headers, **kwargs)
-            if response.status_code != 401 or attempt == 1:
+            try:
+                response = requests.request(method, url, headers=headers, **kwargs)
+            except requests.RequestException:
+                if attempt + 1 >= max_attempts:
+                    raise
+                self._sleep_before_retry(attempt)
+                continue
+            if response.status_code == 401:
+                self._access_token = None
+                self._access_token_expires_at = None
+                if attempt + 1 >= max_attempts:
+                    return response
+                continue
+            if response.status_code not in {429, 500, 502, 503, 504}:
                 return response
-            self._access_token = None
+            if attempt + 1 >= max_attempts:
+                return response
+            headers = getattr(response, "headers", {}) or {}
+            retry_after = headers.get("Retry-After")
+            self._sleep_before_retry(attempt, retry_after)
         raise RuntimeError("Avito request retry failed")
+
+    def _request_with_retries(self, request, *args, **kwargs):
+        max_attempts = max(1, int(os.getenv("AVITO_HTTP_MAX_ATTEMPTS", "3")))
+        for attempt in range(max_attempts):
+            try:
+                response = request(*args, **kwargs)
+            except requests.RequestException:
+                if attempt + 1 >= max_attempts:
+                    raise
+                self._sleep_before_retry(attempt)
+                continue
+            if response.status_code not in {429, 500, 502, 503, 504}:
+                return response
+            if attempt + 1 >= max_attempts:
+                return response
+            headers = getattr(response, "headers", {}) or {}
+            retry_after = headers.get("Retry-After")
+            self._sleep_before_retry(attempt, retry_after)
+        raise RuntimeError("Avito request retry failed")
+
+    @staticmethod
+    def _sleep_before_retry(attempt: int, retry_after: str | None = None) -> None:
+        try:
+            delay = float(retry_after) if retry_after is not None else None
+        except ValueError:
+            delay = None
+        if delay is None:
+            base = max(
+                0.0, float(os.getenv("AVITO_HTTP_RETRY_BASE_SECONDS", "1"))
+            )
+            delay = base * (2**attempt)
+        time.sleep(max(0.0, delay))
