@@ -650,8 +650,12 @@ def main() -> None:
 
     while True:
         try:
+            # A recruiter can open a chat before the next polling cycle. Avito
+            # then removes it from the unread list even though the bot has not
+            # processed its last message. Local message IDs and cursors already
+            # provide the required deduplication, so inspect all recent chats.
             chats = client.get_chats(
-                unread_only=True, limit=CHAT_PAGE_LIMIT
+                unread_only=False, limit=CHAT_PAGE_LIMIT
             )
             failed_chats: set[str] = set()
             for values in iter_new_chat_messages(client, chats, store):
