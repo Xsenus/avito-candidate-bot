@@ -326,6 +326,39 @@ def infer_step_from_bot_message(text: str | None) -> str | None:
     return None
 
 
+def migrate_legacy_completed_chats(
+    client: AvitoClient, store: SQLiteStateStore, chats: list[dict[str, Any]]
+) -> int:
+    """Close chats whose latest recognized legacy bot message is its final reply."""
+    metadata_key = "legacy_completed_chats_migrated_v1"
+    if store.get_metadata(metadata_key) == "true":
+        return 0
+    changed = 0
+    for chat in chats:
+        chat_id = str(chat.get("id") or "").strip()
+        if not chat_id:
+            continue
+        state = store.load(chat_id)
+        if state.application_status == "completed" or state.step == "done":
+            continue
+        latest_step = None
+        for message in oldest_first(client.get_messages(chat_id, limit=100)):
+            if message.get("direction") != "out" or message.get("type") != "text":
+                continue
+            content = message.get("content") or {}
+            text = content.get("text") if isinstance(content, dict) else None
+            inferred = infer_step_from_bot_message(text)
+            if inferred:
+                latest_step = inferred
+        if latest_step == "done":
+            state.step = "done"
+            state.application_status = "completed"
+            store.save(chat_id, state)
+            changed += 1
+    store.set_metadata(metadata_key, "true")
+    return changed
+
+
 def missing_application_fields(state: ConversationState) -> list[str]:
     return [
         name
@@ -510,7 +543,12 @@ def main() -> None:
             unread_only=False, limit=CHAT_PAGE_LIMIT
         )
         initialize_message_cursor(client, store, initial_chats)
+        migrated_completed = migrate_legacy_completed_chats(
+            client, store, initial_chats
+        )
         repaired, returned = reconcile_incomplete_applications(client, store)
+        if migrated_completed:
+            print(f"Migrated legacy completed chats: {migrated_completed}")
         if repaired or returned:
             print(
                 f"Reconciled legacy applications: repaired={repaired}, "

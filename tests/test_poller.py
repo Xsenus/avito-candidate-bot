@@ -7,6 +7,7 @@ from poller import (
     infer_step_from_bot_message,
     initialize_message_cursor,
     iter_new_chat_messages,
+    migrate_legacy_completed_chats,
     process_chat_message,
     reconcile_incomplete_applications,
     restore_collected_fields,
@@ -216,6 +217,39 @@ def test_bootstrap_marks_legacy_completed_chat_terminal(tmp_path):
     restored = store.load("chat-1")
     assert restored.step == "done"
     assert restored.application_status == "completed"
+    store.close()
+
+
+def test_existing_database_migrates_latest_legacy_final_message(tmp_path):
+    store = SQLiteStateStore(tmp_path / "existing-legacy.sqlite3")
+    store.set_metadata("message_history_cursor_initialized_v2", "true")
+    store.save("chat-1", ConversationState(step="awaiting_phone"))
+    messages = [
+        {
+            "id": "legacy-final",
+            "created": 200,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": "Готово, вы записаны! Адрес пришлю позднее."},
+        },
+        {
+            "id": "phone-prompt",
+            "created": 100,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": "И номер"},
+        },
+    ]
+
+    changed = migrate_legacy_completed_chats(
+        FakeHistoryClient(messages), store, [chat(direction="out")]
+    )
+
+    restored = store.load("chat-1")
+    assert changed == 1
+    assert restored.step == "done"
+    assert restored.application_status == "completed"
+    assert store.get_metadata("legacy_completed_chats_migrated_v1") == "true"
     store.close()
 
 
