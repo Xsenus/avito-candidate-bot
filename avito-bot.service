@@ -1,6 +1,7 @@
 [Unit]
 Description=Avito bot poller
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

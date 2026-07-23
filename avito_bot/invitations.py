@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Protocol
 
 import requests
@@ -14,6 +15,15 @@ DEFAULT_SHEET_ID = "1D6aP4Vjt05QMRIogvdtX0wKblbgnNrg-I8lF0Fq26zs"
 DEFAULT_SHEET_GID = "420777109"
 DATE_MARKER = "ДАТА"
 AVITO_TEXT_LIMIT = 1000
+DEFAULT_INVITATION_FOOTER = """Что взять с собой:
+- Паспорт
+- Заряженный смартфон
+
+❗️За день до стажировки до 20:00 вам поступит информация по вашему бригадиру. Свяжитесь с ним утром, когда приедете на склад — он вас встретит.
+
+Если планы изменятся — просто напишите мне.
+До встречи!"""
+QUESTIONS_LINE = "Остались вопросы? Пишите здесь или уточните уже на стажировке."
 
 
 class HttpClient(Protocol):
@@ -26,14 +36,22 @@ class InvitationTemplate:
     text: str
 
     def render(self, internship_date: date | str) -> str:
-        formatted = (
-            internship_date.strftime("%d.%m.%Y")
-            if isinstance(internship_date, date)
-            else str(internship_date).strip()
-        )
+        formatted = format_invitation_date(internship_date)
         if not formatted:
             raise ValueError("Дата стажировки не указана")
-        rendered = self.text.replace(DATE_MARKER, formatted)
+        rendered = replace_date_marker(self.text, formatted)
+        if "Что взять с собой:" not in rendered:
+            footer = os.getenv("INVITATION_FOOTER_TEXT", "").strip()
+            if not footer:
+                footer = DEFAULT_INVITATION_FOOTER
+            if os.getenv("INVITATION_INCLUDE_QUESTIONS_LINE", "false").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                footer = f"{footer}\n\n{QUESTIONS_LINE}"
+            rendered = f"{rendered.rstrip()}\n\n{footer}"
         if len(rendered) > AVITO_TEXT_LIMIT:
             raise ValueError(
                 f"Приглашение для СЦ «{self.service_center}» превышает "
@@ -53,7 +71,11 @@ class InvitationCatalog:
                 raise ValueError(
                     f"В приглашении для СЦ «{template.service_center}» нет маркера ДАТА"
                 )
-            if len(template.text.replace(DATE_MARKER, "31.12.2099")) > AVITO_TEXT_LIMIT:
+            if len(
+                replace_date_marker(template.text, "31.12.")
+                + "\n\n"
+                + DEFAULT_INVITATION_FOOTER
+            ) > AVITO_TEXT_LIMIT:
                 raise ValueError(
                     f"Приглашение для СЦ «{template.service_center}» превышает "
                     f"лимит Avito {AVITO_TEXT_LIMIT} символов"
@@ -119,6 +141,26 @@ def normalize_service_center(value: str) -> str:
     normalized = (value or "").strip().casefold().replace("ё", "е")
     normalized = re.sub(r"^сц[\s:_-]+", "", normalized)
     return re.sub(r"\s+", " ", normalized)
+
+
+def format_invitation_date(internship_date: date | str) -> str:
+    if isinstance(internship_date, date):
+        return internship_date.strftime("%d.%m.")
+    raw = str(internship_date or "").strip()
+    for pattern in ("%d.%m.%Y", "%Y-%m-%d", "%d.%m.", "%d.%m"):
+        try:
+            return datetime.strptime(raw, pattern).strftime("%d.%m.")
+        except ValueError:
+            continue
+    if re.fullmatch(r"\d{4}", raw):
+        return f"{raw[:2]}.{raw[2:]}."
+    return raw
+
+
+def replace_date_marker(text: str, formatted: str) -> str:
+    if formatted.endswith("."):
+        return text.replace(f"{DATE_MARKER}.", formatted).replace(DATE_MARKER, formatted)
+    return text.replace(DATE_MARKER, formatted)
 
 
 def _find_header(rows: list[list[str]]) -> int:

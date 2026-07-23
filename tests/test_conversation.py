@@ -116,3 +116,50 @@ def test_weekday_sent_with_internship_consent_is_not_asked_twice(monkeypatch):
     assert reply
     assert state.step == "awaiting_full_name"
     assert state.internship_date == "23.07.2026"
+
+
+def test_moscow_candidate_selects_warehouse_before_date():
+    state = ConversationState(step="awaiting_staj", city="Москва")
+
+    prompt = handle_user_message(state, "Да", city_hint="Москва")
+
+    assert state.step == "awaiting_warehouse"
+    assert "1. Железнодорожный" in prompt
+    assert "8. СЦ Тарный" in prompt
+
+    reply = handle_user_message(state, "4", city_hint="Москва")
+
+    assert state.step == "awaiting_datetime"
+    assert state.warehouse_choice == 4
+    assert state.service_center == "Печатники"
+    assert state.address == "Курьяновская набережная, 6с2"
+    assert "день недели" in reply
+
+
+def test_invalid_warehouse_choice_does_not_advance():
+    state = ConversationState(step="awaiting_warehouse", city="Санкт-Петербург")
+
+    reply = handle_user_message(state, "что-нибудь", city_hint=state.city)
+
+    assert state.step == "awaiting_warehouse"
+    assert state.service_center is None
+    assert "Укажите номер" in reply
+
+
+def test_zero_cancels_application_and_makes_it_terminal():
+    state = ConversationState(step="awaiting_warehouse", city="Москва")
+
+    reply = handle_user_message(state, "0", city_hint=state.city)
+
+    assert state.step == "done"
+    assert state.application_status == "cancelled"
+    assert "отменил" in reply
+
+
+def test_non_regional_city_keeps_existing_date_flow():
+    state = ConversationState(step="awaiting_staj", city="Кемерово")
+
+    reply = handle_user_message(state, "Да", city_hint="Кемерово")
+
+    assert state.step == "awaiting_datetime"
+    assert "день недели" in reply

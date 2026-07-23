@@ -6,7 +6,9 @@ from poller import (
     extract_chat_context,
     infer_step_from_bot_message,
     initialize_message_cursor,
+    is_job_application_system_message,
     iter_new_chat_messages,
+    iter_unanswered_job_applications,
     migrate_legacy_completed_chats,
     process_chat_message,
     reconcile_incomplete_applications,
@@ -49,6 +51,100 @@ def test_only_incoming_unprocessed_messages_are_yielded(tmp_path):
     assert len(list(iter_new_chat_messages(outgoing_client, [outgoing], store))) == 0
     store.mark_processed("chat-1", "message-1")
     assert len(list(iter_new_chat_messages(incoming_client, [incoming], store))) == 0
+    store.close()
+
+
+def job_application_message(message_id, created, flow_id):
+    return {
+        "id": message_id,
+        "created": created,
+        "direction": "in",
+        "type": "system",
+        "content": {"text": "system application", "flow_id": flow_id},
+    }
+
+
+def test_new_job_application_system_pair_starts_only_once(tmp_path):
+    store = SQLiteStateStore(tmp_path / "system-application.sqlite3")
+    messages = [
+        job_application_message("enrichment", 200, "job_apply_enrichment"),
+        job_application_message("job", 100, "job"),
+    ]
+    candidate_chat = chat()
+    candidate_chat["last_message"] = messages[0]
+
+    yielded = list(
+        iter_new_chat_messages(FakeHistoryClient(messages), [candidate_chat], store)
+    )
+
+    assert [values[3] for values in yielded] == ["enrichment"]
+    assert is_job_application_system_message(messages[0])
+    assert store.is_processed("chat-1", "job")
+    store.close()
+
+
+def test_unrelated_system_message_is_ignored(tmp_path):
+    store = SQLiteStateStore(tmp_path / "unrelated-system.sqlite3")
+    message = job_application_message("unrelated", 100, "some_other_flow")
+    candidate_chat = chat()
+    candidate_chat["last_message"] = message
+
+    assert not list(
+        iter_new_chat_messages(
+            FakeHistoryClient([message]), [candidate_chat], store
+        )
+    )
+    assert store.is_processed("chat-1", "unrelated")
+    store.close()
+
+
+def test_recent_unanswered_application_can_be_recovered(tmp_path):
+    from datetime import datetime, timezone
+
+    store = SQLiteStateStore(tmp_path / "recover-system.sqlite3")
+    message = job_application_message("enrichment", 1_000, "job_apply_enrichment")
+    candidate_chat = chat()
+    candidate_chat["last_message"] = message
+    store.mark_message_seen("chat-1", "enrichment", 1_000)
+
+    recovered = list(
+        iter_unanswered_job_applications(
+            FakeHistoryClient([message]),
+            [candidate_chat],
+            store,
+            now=datetime.fromtimestamp(1_100, timezone.utc),
+        )
+    )
+
+    assert [values[3] for values in recovered] == ["enrichment"]
+    store.close()
+
+
+def test_recovery_skips_chat_with_an_outgoing_reply(tmp_path):
+    from datetime import datetime, timezone
+
+    store = SQLiteStateStore(tmp_path / "recover-replied.sqlite3")
+    messages = [
+        {
+            "id": "reply",
+            "created": 1_100,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": "already answered"},
+        },
+        job_application_message("job", 1_000, "job"),
+    ]
+    candidate_chat = chat(direction="out")
+    candidate_chat["last_message"] = messages[0]
+
+    assert not list(
+        iter_unanswered_job_applications(
+            FakeHistoryClient(messages),
+            [candidate_chat],
+            store,
+            now=datetime.fromtimestamp(1_200, timezone.utc),
+        )
+    )
     store.close()
 
 
@@ -402,7 +498,8 @@ def test_phone_triggers_form_then_invitation_and_persists_completion(tmp_path):
     restored = store.load("chat-1")
     assert form.applications[0].phone == "+79272069701"
     assert client.messages[0][1].startswith("Спасибо, данные получили")
-    assert client.messages[1][1] == "Приглашение на 23.07.2026, Кемерово"
+    assert client.messages[1][1].startswith("Приглашение на 23.07., Кемерово")
+    assert client.messages[1][1].endswith("До встречи!")
     assert restored.application_status == "completed"
     assert restored.step == "done"
     assert store.is_processed("chat-1", "message-1")
@@ -460,9 +557,64 @@ def test_complete_candidate_journey_survives_state_reload(tmp_path, monkeypatch)
     assert form.applications[0].warehouse == "СЦ Кемерово"
     assert form.applications[0].tariff == "Драйв"
     assert form.applications[0].citizenship == "Российская Федерация"
-    assert client.messages[-1][1] == "Приглашение на 23.07.2026, Кемерово"
+    assert client.messages[-1][1].startswith("Приглашение на 23.07., Кемерово")
+    assert client.messages[-1][1].endswith("До встречи!")
     assert len(delayed) == 1
     assert all(store.is_processed("chat-journey", f"message-{i}") for i in range(1, 7))
+    store.close()
+
+
+def test_moscow_journey_persists_selected_warehouse_and_uses_it_in_form(
+    tmp_path, monkeypatch
+):
+    class MoscowInvitationSource:
+        def load(self):
+            return InvitationCatalog.from_csv(
+                '"СЦ","Текст сообщения"\n'
+                '"Печатники","Вы записаны ДАТА на склад Печатники"\n'
+            )
+
+    store = SQLiteStateStore(tmp_path / "moscow-journey.sqlite3")
+    client = FakeClient()
+    form = FakeForm()
+    workflow = CandidateWorkflow(form, MoscowInvitationSource())
+    monkeypatch.setattr("poller.schedule_delayed_message", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "avito_bot.conversation.resolve_internship_date",
+        lambda value: __import__("datetime").date(2026, 7, 23),
+    )
+
+    answers = [
+        "Здравствуйте",
+        "Да",
+        "Да",
+        "4",
+        "четверг",
+        "Иванов Иван",
+        "8 999 123-45-67",
+    ]
+    for index, answer in enumerate(answers, start=1):
+        process_chat_message(
+            client,
+            workflow,
+            store,
+            "chat-moscow",
+            store.load("chat-moscow"),
+            {"content": {"text": answer}},
+            f"moscow-message-{index}",
+            "Москва",
+            "moscow-item",
+        )
+
+    restored = store.load("chat-moscow")
+    assert restored.step == "done"
+    assert restored.application_status == "completed"
+    assert restored.warehouse_choice == 4
+    assert restored.warehouse_selection_source == "candidate"
+    assert restored.service_center == "Печатники"
+    assert restored.address == "Курьяновская набережная, 6с2"
+    assert form.applications[0].warehouse == "СЦ Печатники"
+    assert client.messages[-1][1].startswith("Вы записаны 23.07. на склад Печатники")
     store.close()
 
 

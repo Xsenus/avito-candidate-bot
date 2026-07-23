@@ -1,0 +1,42 @@
+import pytest
+
+from avito_bot.warehouses import (
+    parse_warehouse_choice,
+    warehouse_group_for_city,
+    warehouse_prompt_for_city,
+)
+
+
+@pytest.mark.parametrize(
+    "city",
+    ["Москва", "г. Москва", "МСК", "Мытищи", "Дзержинский", "Подольск"],
+)
+def test_moscow_region_cities_use_eight_warehouses(city):
+    assert warehouse_group_for_city(city) == "moscow"
+    prompt = warehouse_prompt_for_city(city)
+    assert "1. Железнодорожный" in prompt
+    assert "8. СЦ Тарный" in prompt
+
+
+@pytest.mark.parametrize(
+    "city", ["Санкт-Петербург", "г. Санкт Петербург", "СПб", "Питер", "Бугры"]
+)
+def test_saint_petersburg_region_uses_two_warehouses(city):
+    assert warehouse_group_for_city(city) == "saint_petersburg"
+    prompt = warehouse_prompt_for_city(city)
+    assert "1. Троицкий" in prompt
+    assert "2. Бугры" in prompt
+    assert "3." not in prompt
+
+
+def test_other_city_does_not_get_a_warehouse_prompt():
+    assert warehouse_group_for_city("Кемерово") is None
+    assert warehouse_prompt_for_city("Кемерово") is None
+
+
+def test_warehouse_choice_accepts_number_and_name():
+    assert parse_warehouse_choice("номер 4", "Москва").service_center == "Печатники"
+    assert parse_warehouse_choice("Строгино", "Москва").number == 6
+    assert parse_warehouse_choice("2", "Бугры").service_center == "Бугры"
+    assert parse_warehouse_choice("0", "Москва") == 0
+    assert parse_warehouse_choice("99", "Москва") is None
