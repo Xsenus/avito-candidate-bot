@@ -156,10 +156,11 @@ def test_zero_cancels_application_and_makes_it_terminal():
     assert "отменил" in reply
 
 
-def test_non_regional_city_keeps_existing_date_flow():
-    state = ConversationState(step="awaiting_staj", city="Кемерово")
+@pytest.mark.parametrize("city", ["Кемерово", "Томск", "Омск"])
+def test_non_regional_city_keeps_existing_date_flow(city):
+    state = ConversationState(step="awaiting_staj", city=city)
 
-    reply = handle_user_message(state, "Да", city_hint="Кемерово")
+    reply = handle_user_message(state, "Да", city_hint=city)
 
     assert state.step == "awaiting_datetime"
     assert "день недели" in reply

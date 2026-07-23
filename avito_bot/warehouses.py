@@ -100,11 +100,21 @@ def normalize_location(value: str | None) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+def _contains_location_alias(normalized: str, aliases: set[str]) -> bool:
+    words = normalized.split()
+    for alias in aliases:
+        alias_words = alias.split()
+        width = len(alias_words)
+        if any(words[index : index + width] == alias_words for index in range(len(words))):
+            return True
+    return False
+
+
 def warehouse_group_for_city(city: str | None) -> str | None:
     normalized = normalize_location(city)
-    if any(alias in normalized for alias in MOSCOW_CITY_ALIASES):
+    if _contains_location_alias(normalized, MOSCOW_CITY_ALIASES):
         return "moscow"
-    if any(alias in normalized for alias in SAINT_PETERSBURG_CITY_ALIASES):
+    if _contains_location_alias(normalized, SAINT_PETERSBURG_CITY_ALIASES):
         return "saint_petersburg"
     return None
 

@@ -29,9 +29,13 @@ def test_saint_petersburg_region_uses_two_warehouses(city):
     assert "3." not in prompt
 
 
-def test_other_city_does_not_get_a_warehouse_prompt():
-    assert warehouse_group_for_city("Кемерово") is None
-    assert warehouse_prompt_for_city("Кемерово") is None
+@pytest.mark.parametrize(
+    "city",
+    ["Кемерово", "Томск", "Омск", "Московская область", "Питерский район"],
+)
+def test_other_city_does_not_get_a_warehouse_prompt(city):
+    assert warehouse_group_for_city(city) is None
+    assert warehouse_prompt_for_city(city) is None
 
 
 def test_warehouse_choice_accepts_number_and_name():
