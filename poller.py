@@ -100,7 +100,11 @@ def iter_new_chat_messages(
             if not message_id or store.is_processed(chat_id, message_id):
                 continue
             key = message_key(message)
-            if only_last_message and message_id != last_message_id:
+            if (
+                only_last_message
+                and message_id != last_message_id
+                and message_id != latest_job_application_id
+            ):
                 store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
             if key is None and message_id != last_message_id:
@@ -637,6 +641,18 @@ def main() -> None:
             client, store, initial_chats
         )
         repaired, returned = reconcile_incomplete_applications(client, store)
+        recovered_unanswered = 0
+        for values in iter_unanswered_job_applications(
+            client, initial_chats, store
+        ):
+            try:
+                process_chat_message(client, workflow, store, *values)
+                recovered_unanswered += 1
+            except Exception as exc:
+                print(
+                    f"unanswered application recovery error "
+                    f"chat_id={values[0]}: {exc}"
+                )
         if migrated_completed:
             print(f"Migrated legacy completed chats: {migrated_completed}")
         if repaired or returned:
@@ -644,6 +660,8 @@ def main() -> None:
                 f"Reconciled legacy applications: repaired={repaired}, "
                 f"returned_to_collection={returned}"
             )
+        if recovered_unanswered:
+            print(f"Recovered unanswered applications: {recovered_unanswered}")
     except Exception as exc:
         print(f"Failed to initialize message cursor: {exc}")
         return

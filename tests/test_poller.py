@@ -83,6 +83,26 @@ def test_new_job_application_system_pair_starts_only_once(tmp_path):
     store.close()
 
 
+def test_new_job_application_uses_newest_trigger_when_chat_preview_is_stale(
+    tmp_path,
+):
+    store = SQLiteStateStore(tmp_path / "stale-chat-preview.sqlite3")
+    messages = [
+        job_application_message("enrichment", 200, "job_apply_enrichment"),
+        job_application_message("job", 100, "job"),
+    ]
+    candidate_chat = chat()
+    candidate_chat["last_message"] = messages[1]
+
+    yielded = list(
+        iter_new_chat_messages(FakeHistoryClient(messages), [candidate_chat], store)
+    )
+
+    assert [values[3] for values in yielded] == ["enrichment"]
+    assert store.is_processed("chat-1", "job")
+    store.close()
+
+
 def test_unrelated_system_message_is_ignored(tmp_path):
     store = SQLiteStateStore(tmp_path / "unrelated-system.sqlite3")
     message = job_application_message("unrelated", 100, "some_other_flow")
