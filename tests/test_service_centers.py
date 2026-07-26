@@ -47,6 +47,8 @@ def test_item_override_has_priority():
         ("Москва", "Дмитровское"),
         ("Мытищи", "Север"),
         ("Санкт-Петербург", "Троицкий"),
+        ("Кущевская", "Ростов"),
+        ("Кущёвская", "Ростов"),
     ],
 )
 def test_verified_big_city_defaults(city, expected):
