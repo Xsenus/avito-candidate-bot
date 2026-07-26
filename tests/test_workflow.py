@@ -34,7 +34,8 @@ class RostovInvitationSource:
     def load(self):
         return InvitationCatalog.from_csv(
             '"СЦ","Текст сообщения"\n'
-            '"Ростов","Приглашение Ростов ДАТА"\n'
+            '"Ростов","Приглашение Ростов ДАТА. '
+            'Стажировка начинается в 9:00"\n'
         )
 
 

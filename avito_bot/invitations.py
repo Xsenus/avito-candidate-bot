@@ -15,6 +15,17 @@ DEFAULT_SHEET_ID = "1D6aP4Vjt05QMRIogvdtX0wKblbgnNrg-I8lF0Fq26zs"
 DEFAULT_SHEET_GID = "420777109"
 DATE_MARKER = "ДАТА"
 AVITO_TEXT_LIMIT = 1000
+INVITATION_TIME_OVERRIDES = {
+    "ростов": "10:30",
+    "ростов-на-дону": "10:30",
+    "краснодар": "10:30",
+    "нижний новгород": "10:30",
+}
+INTERNSHIP_START_TIME_PATTERN = re.compile(
+    r"(?P<prefix>стажировка\s+начинается\s+в\s+)"
+    r"\d{1,2}:\d{2}(?::\d{2})?",
+    re.IGNORECASE,
+)
 DEFAULT_INVITATION_FOOTER = """Что взять с собой:
 - Паспорт
 - Заряженный смартфон
@@ -40,6 +51,7 @@ class InvitationTemplate:
         if not formatted:
             raise ValueError("Дата стажировки не указана")
         rendered = replace_date_marker(self.text, formatted)
+        rendered = apply_invitation_time_override(self.service_center, rendered)
         if "Что взять с собой:" not in rendered:
             footer = os.getenv("INVITATION_FOOTER_TEXT", "").strip()
             if not footer:
@@ -71,8 +83,12 @@ class InvitationCatalog:
                 raise ValueError(
                     f"В приглашении для СЦ «{template.service_center}» нет маркера ДАТА"
                 )
+            validated_text = apply_invitation_time_override(
+                template.service_center,
+                template.text,
+            )
             if len(
-                replace_date_marker(template.text, "31.12.")
+                replace_date_marker(validated_text, "31.12.")
                 + "\n\n"
                 + DEFAULT_INVITATION_FOOTER
             ) > AVITO_TEXT_LIMIT:
@@ -141,6 +157,26 @@ def normalize_service_center(value: str) -> str:
     normalized = (value or "").strip().casefold().replace("ё", "е")
     normalized = re.sub(r"^сц[\s:_-]+", "", normalized)
     return re.sub(r"\s+", " ", normalized)
+
+
+def apply_invitation_time_override(service_center: str, text: str) -> str:
+    start_time = INVITATION_TIME_OVERRIDES.get(
+        normalize_service_center(service_center)
+    )
+    if not start_time:
+        return text
+
+    rendered, replacements = INTERNSHIP_START_TIME_PATTERN.subn(
+        lambda match: f"{match.group('prefix')}{start_time}",
+        text,
+        count=1,
+    )
+    if replacements != 1:
+        raise ValueError(
+            f"В приглашении для СЦ «{service_center}» не найдено "
+            "время начала стажировки"
+        )
+    return rendered
 
 
 def format_invitation_date(internship_date: date | str) -> str:
