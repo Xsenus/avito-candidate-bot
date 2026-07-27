@@ -157,9 +157,7 @@ def warehouse_prompt_for_city(city: str | None) -> str | None:
         lines.extend(
             [
                 f"{option.number}. {option.label}",
-                "",
                 f"   📍 {option.address}",
-                "",
                 f"   🕥 Стажировка в {option.internship_time}",
                 "",
             ]

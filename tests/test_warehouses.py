@@ -19,6 +19,13 @@ def test_moscow_region_cities_use_eight_warehouses(city):
     assert "🕥 Стажировка в 7:00:00" in prompt
     assert "🕥 Стажировка в 8:30:00" in prompt
     assert "Напишите номер подходящего склада (1–8)" in prompt
+    assert (
+        "1. Железнодорожный\n"
+        "   📍 г. Балашиха, микрорайон Железнодорожный, улица Советская, "
+        "владение 89, строение 1\n"
+        "   🕥 Стажировка в 7:00:00\n\n"
+        "2. Запад"
+    ) in prompt
     assert len(prompt) <= 1000
 
 
