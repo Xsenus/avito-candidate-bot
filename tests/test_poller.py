@@ -1,5 +1,8 @@
-from avito_bot.conversation import ConversationState
+import pytest
+
+from avito_bot.conversation import INITIAL_MESSAGE, ConversationState
 from avito_bot.invitations import InvitationCatalog
+from avito_bot.regional_locations import RegionalLocationCatalog
 from avito_bot.storage import SQLiteStateStore
 from avito_bot.workflow import CandidateWorkflow
 from poller import (
@@ -486,6 +489,186 @@ class FakeInvitationSource:
             '"СЦ","Текст сообщения"\n'
             '"Кемерово","Приглашение на ДАТА, Кемерово"\n'
         )
+
+
+def regional_catalog():
+    return RegionalLocationCatalog.from_csv(
+        " ,СЦ,Куда приглашать на стажировку,Время стажировки\n"
+        'Кемерово,Кемерово,"Кемерово, ул. Терешковой д.41/11",8:00:00\n'
+        'Краснодар,Краснодар,"г. Краснодар, х. Октябрьский, '
+        'ул. Подсолнечная, 44",10:30:00\n'
+    )
+
+
+def test_regional_application_immediately_sends_three_messages(tmp_path):
+    store = SQLiteStateStore(tmp_path / "regional-intro.sqlite3")
+    client = FakeClient()
+    workflow = CandidateWorkflow(FakeForm(), FakeInvitationSource())
+    message = job_application_message("regional-job", 100, "job")
+
+    process_chat_message(
+        client,
+        workflow,
+        store,
+        "chat-regional",
+        ConversationState(),
+        message,
+        "regional-job",
+        "Краснодар",
+        "8259136221",
+        regional_locations=regional_catalog(),
+    )
+
+    restored = store.load("chat-regional")
+    assert len(client.messages) == 3
+    assert client.messages[0][1].startswith("1. 🚚 Водитель")
+    assert client.messages[1][1].startswith("🛠 О работе")
+    assert "ул. Подсолнечная, 44" in client.messages[2][1]
+    assert "10:30:00" in client.messages[2][1]
+    assert restored.step == "awaiting_datetime"
+    assert restored.service_center == "Краснодар"
+    assert restored.warehouse_selection_source == "regional_catalog"
+    assert restored.address.endswith("ул. Подсолнечная, 44")
+    assert restored.internship_time == "10:30:00"
+    assert restored.regional_intro_messages_sent == 3
+    assert restored.regional_intro_trigger_message_id is None
+    assert store.is_processed("chat-regional", "regional-job")
+    store.close()
+
+
+def test_regional_intro_resumes_after_interrupted_send(tmp_path):
+    class InterruptedClient(FakeClient):
+        def send_message(self, chat_id, text):
+            if len(self.messages) == 1:
+                raise RuntimeError("temporary Avito failure")
+            super().send_message(chat_id, text)
+
+    store = SQLiteStateStore(tmp_path / "regional-resume.sqlite3")
+    workflow = CandidateWorkflow(FakeForm(), FakeInvitationSource())
+    message = job_application_message("regional-job", 100, "job")
+    interrupted = InterruptedClient()
+
+    with pytest.raises(RuntimeError, match="temporary Avito failure"):
+        process_chat_message(
+            interrupted,
+            workflow,
+            store,
+            "chat-regional",
+            ConversationState(),
+            message,
+            "regional-job",
+            "Кемерово",
+            "item",
+            regional_locations=regional_catalog(),
+        )
+
+    partial = store.load("chat-regional")
+    assert partial.step == "sending_regional_intro"
+    assert partial.regional_intro_messages_sent == 1
+    assert not store.is_processed("chat-regional", "regional-job")
+
+    resumed = FakeClient()
+    process_chat_message(
+        resumed,
+        workflow,
+        store,
+        "chat-regional",
+        partial,
+        message,
+        "regional-job",
+        "Кемерово",
+        "item",
+        regional_locations=regional_catalog(),
+    )
+
+    restored = store.load("chat-regional")
+    assert len(resumed.messages) == 2
+    assert resumed.messages[0][1].startswith("🛠 О работе")
+    assert resumed.messages[1][1].startswith("Подобрали для вас склад")
+    assert restored.step == "awaiting_datetime"
+    assert restored.regional_intro_messages_sent == 3
+    assert store.is_processed("chat-regional", "regional-job")
+    store.close()
+
+
+def test_moscow_application_keeps_existing_flow(
+    tmp_path, monkeypatch
+):
+    store = SQLiteStateStore(tmp_path / "moscow-existing-flow.sqlite3")
+    client = FakeClient()
+    workflow = CandidateWorkflow(FakeForm(), FakeInvitationSource())
+    delayed = []
+    monkeypatch.setattr(
+        "poller.schedule_delayed_message",
+        lambda client, chat_id, text, delay: delayed.append((chat_id, text, delay)),
+    )
+    message = job_application_message("moscow-job", 100, "job")
+
+    process_chat_message(
+        client,
+        workflow,
+        store,
+        "chat-moscow-existing",
+        ConversationState(),
+        message,
+        "moscow-job",
+        "Москва",
+        "moscow-item",
+        regional_locations=regional_catalog(),
+    )
+
+    restored = store.load("chat-moscow-existing")
+    assert len(client.messages) == 1
+    assert client.messages[0][1] == INITIAL_MESSAGE
+    assert len(delayed) == 1
+    assert restored.step == "awaiting_interest"
+    assert restored.regional_intro_messages_sent == 0
+    store.close()
+
+
+def test_regional_journey_uses_catalog_center_in_form(
+    tmp_path, monkeypatch
+):
+    store = SQLiteStateStore(tmp_path / "regional-journey.sqlite3")
+    client = FakeClient()
+    form = FakeForm()
+    workflow = CandidateWorkflow(form, FakeInvitationSource())
+    monkeypatch.setattr(
+        "avito_bot.conversation.resolve_internship_date",
+        lambda value: __import__("datetime").date(2026, 7, 30),
+    )
+
+    messages = [
+        job_application_message("regional-job", 100, "job"),
+        {"content": {"text": "четверг"}},
+        {"content": {"text": "Иванов Иван"}},
+        {"content": {"text": "8 999 123-45-67"}},
+    ]
+    for index, message in enumerate(messages):
+        process_chat_message(
+            client,
+            workflow,
+            store,
+            "chat-regional-journey",
+            store.load("chat-regional-journey"),
+            message,
+            str(message.get("id") or f"regional-answer-{index}"),
+            "Кемерово",
+            "regional-item",
+            regional_locations=regional_catalog(),
+        )
+
+    restored = store.load("chat-regional-journey")
+    assert restored.step == "done"
+    assert restored.application_status == "completed"
+    assert restored.service_center == "Кемерово"
+    assert restored.internship_time == "8:00:00"
+    assert form.applications[0].warehouse == "СЦ Кемерово"
+    assert form.applications[0].internship_date == "30.07.2026"
+    assert client.messages[-1][1].startswith(
+        "Приглашение на 30.07., Кемерово"
+    )
+    store.close()
 
 
 def test_phone_triggers_form_then_invitation_and_persists_completion(tmp_path):

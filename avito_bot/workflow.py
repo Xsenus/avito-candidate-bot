@@ -66,7 +66,10 @@ class CandidateWorkflow:
             )
 
         catalog = self.invitation_source.load()
-        if state.service_center and state.warehouse_selection_source == "candidate":
+        if state.service_center and state.warehouse_selection_source in {
+            "candidate",
+            "regional_catalog",
+        }:
             selected_template = catalog.find(state.service_center)
             selection = ServiceCenterSelection(
                 selected_template.service_center.removeprefix("СЦ ").strip()

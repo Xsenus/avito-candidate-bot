@@ -27,7 +27,16 @@ from avito_bot.conversation import (
     schedule_delayed_message,
 )
 from avito_bot.candidate import normalize_phone, resolve_internship_date, split_full_name
+from avito_bot.regional_locations import (
+    DEFAULT_SHEET_GID as DEFAULT_REGIONAL_LOCATIONS_GID,
+    DEFAULT_SHEET_ID as DEFAULT_REGIONAL_LOCATIONS_SHEET_ID,
+    GoogleSheetRegionalLocationSource,
+    RegionalLocationCatalog,
+    regional_initial_messages,
+)
+from avito_bot.service_centers import parse_service_center_overrides
 from avito_bot.storage import SQLiteStateStore
+from avito_bot.warehouses import warehouse_group_for_city
 from avito_bot.workflow import CandidateWorkflow, mark_invitation_sent
 from avito_bot.yandex_form import FormConfigurationError, YandexFormSubmitter
 
@@ -571,11 +580,39 @@ def process_chat_message(
     message_id: str,
     city: str | None,
     item_id: str | None,
+    *,
+    regional_locations: RegionalLocationCatalog | None = None,
+    regional_overrides: dict[str, str] | None = None,
 ) -> None:
     content = message.get("content") or {}
     text = content.get("text", "")
     state.city = city or state.city
     state.item_id = item_id or state.item_id
+
+    if (
+        regional_locations is not None
+        and state.step in {"idle", "sending_regional_intro"}
+        and is_job_application_system_message(message)
+        and warehouse_group_for_city(state.city) is None
+    ):
+        send_regional_initial_sequence(
+            client,
+            store,
+            chat_id,
+            state,
+            message_id,
+            regional_locations,
+            regional_overrides,
+        )
+        store.mark_message_seen(
+            chat_id, message_id, normalized_created(message)
+        )
+        print(
+            f"regional application started chat_id={chat_id} "
+            f"message_id={message_id} city={state.city!r} "
+            f"service_center={state.service_center!r}"
+        )
+        return
 
     reply = handle_user_message(state, text, city_hint=state.city)
     if reply:
@@ -594,6 +631,38 @@ def process_chat_message(
         f"reply_sent={bool(reply)} step={state.step} "
         f"application_status={state.application_status}"
     )
+
+
+def send_regional_initial_sequence(
+    client: AvitoClient,
+    store: SQLiteStateStore,
+    chat_id: str,
+    state: ConversationState,
+    message_id: str,
+    catalog: RegionalLocationCatalog,
+    overrides: dict[str, str] | None = None,
+) -> None:
+    location = catalog.resolve(state.city, state.item_id, overrides)
+    if state.regional_intro_trigger_message_id != message_id:
+        state.regional_intro_trigger_message_id = message_id
+        state.regional_intro_messages_sent = 0
+
+    state.step = "sending_regional_intro"
+    state.service_center = location.service_center
+    state.warehouse_selection_source = "regional_catalog"
+    state.address = location.address
+    state.internship_time = location.internship_time
+    store.save(chat_id, state)
+
+    messages = regional_initial_messages(location)
+    for outgoing_text in messages[state.regional_intro_messages_sent :]:
+        client.send_message(chat_id, outgoing_text)
+        state.regional_intro_messages_sent += 1
+        store.save(chat_id, state)
+
+    state.step = "awaiting_datetime"
+    state.regional_intro_trigger_message_id = None
+    store.save(chat_id, state)
 
 
 def main() -> None:
@@ -621,8 +690,43 @@ def main() -> None:
             "manual verification is required"
         )
     workflow = CandidateWorkflow.from_env(YandexFormSubmitter.from_env())
+    regional_source = GoogleSheetRegionalLocationSource(
+        os.getenv(
+            "REGIONAL_LOCATIONS_SHEET_ID",
+            DEFAULT_REGIONAL_LOCATIONS_SHEET_ID,
+        ),
+        os.getenv(
+            "REGIONAL_LOCATIONS_SHEET_GID",
+            DEFAULT_REGIONAL_LOCATIONS_GID,
+        ),
+        timeout=max(
+            5,
+            int(os.getenv("REGIONAL_LOCATIONS_TIMEOUT_SECONDS", "30")),
+        ),
+    )
+    try:
+        regional_locations = regional_source.load(
+            os.getenv(
+                "REGIONAL_LOCATIONS_CACHE_PATH",
+                str(
+                    Path(PROJECT_ROOT)
+                    / "data"
+                    / "regional_locations.csv"
+                ),
+            )
+        )
+    except Exception as exc:
+        print(f"Failed to load regional locations: {exc}")
+        return
+    regional_overrides = parse_service_center_overrides(
+        os.getenv("SERVICE_CENTER_OVERRIDES_JSON", "")
+    )
     interval = max(5, int(os.getenv("POLL_INTERVAL_SECONDS", "15")))
-    print(f"Starting poller with interval={interval}s state_db={state_path}")
+    print(
+        f"Starting poller with interval={interval}s state_db={state_path} "
+        f"regional_locations={len(regional_locations)} "
+        f"regional_locations_cache={regional_source.last_load_used_cache}"
+    )
 
     try:
         client.get_access_token()
@@ -646,7 +750,14 @@ def main() -> None:
             client, initial_chats, store
         ):
             try:
-                process_chat_message(client, workflow, store, *values)
+                process_chat_message(
+                    client,
+                    workflow,
+                    store,
+                    *values,
+                    regional_locations=regional_locations,
+                    regional_overrides=regional_overrides,
+                )
                 recovered_unanswered += 1
             except Exception as exc:
                 print(
@@ -686,7 +797,14 @@ def main() -> None:
                 if values[0] in failed_chats:
                     continue
                 try:
-                    process_chat_message(client, workflow, store, *values)
+                    process_chat_message(
+                        client,
+                        workflow,
+                        store,
+                        *values,
+                        regional_locations=regional_locations,
+                        regional_overrides=regional_overrides,
+                    )
                     processed_since_health += 1
                 except Exception as exc:
                     failed_chats.add(values[0])

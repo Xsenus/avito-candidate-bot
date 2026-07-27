@@ -25,6 +25,9 @@ class ConversationState:
     warehouse_choice: int | None = None
     warehouse_selection_source: str | None = None
     address: str | None = None
+    internship_time: str | None = None
+    regional_intro_messages_sent: int = 0
+    regional_intro_trigger_message_id: str | None = None
     date_time: str | None = None
     internship_date: str | None = None
     tariff: str = "Драйв"

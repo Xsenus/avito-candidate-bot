@@ -7,11 +7,14 @@ from dotenv import load_dotenv
 
 from avito_bot.avito_client import AvitoClient
 from avito_bot.invitations import GoogleSheetInvitationSource
+from avito_bot.regional_locations import GoogleSheetRegionalLocationSource
 from avito_bot.service_centers import (
+    ServiceCenterSelection,
     form_option_for,
     parse_service_center_overrides,
     resolve_service_center,
 )
+from avito_bot.warehouses import warehouse_group_for_city
 from avito_bot.yandex_form import CandidateApplication, YandexFormSubmitter
 
 
@@ -54,6 +57,17 @@ def load_active_warehouses() -> list[str]:
         os.getenv("INVITATIONS_SHEET_ID", "1D6aP4Vjt05QMRIogvdtX0wKblbgnNrg-I8lF0Fq26zs"),
         os.getenv("INVITATIONS_SHEET_GID", "420777109"),
     ).load()
+    regional_locations = GoogleSheetRegionalLocationSource(
+        os.getenv(
+            "REGIONAL_LOCATIONS_SHEET_ID",
+            "1D6aP4Vjt05QMRIogvdtX0wKblbgnNrg-I8lF0Fq26zs",
+        ),
+        os.getenv("REGIONAL_LOCATIONS_SHEET_GID", "1350376870"),
+        timeout=max(
+            5,
+            int(os.getenv("REGIONAL_LOCATIONS_TIMEOUT_SECONDS", "30")),
+        ),
+    ).load()
     center_overrides = parse_service_center_overrides(
         os.getenv("SERVICE_CENTER_OVERRIDES_JSON", "")
     )
@@ -71,9 +85,16 @@ def load_active_warehouses() -> list[str]:
         item_id = str(value.get("id") or "").strip() or None
         if not isinstance(city, str) or not city.strip():
             continue
-        selection = resolve_service_center(
-            city, item_id, catalog, center_overrides
-        )
+        if warehouse_group_for_city(city) is None:
+            regional = regional_locations.resolve(
+                city, item_id, center_overrides
+            )
+            catalog.find(regional.service_center)
+            selection = ServiceCenterSelection(regional.service_center)
+        else:
+            selection = resolve_service_center(
+                city, item_id, catalog, center_overrides
+            )
         warehouses.add(form_option_for(selection.name, form_overrides))
     if not warehouses:
         warehouses.add(os.getenv("YANDEX_FORM_TEST_WAREHOUSE", "СЦ Кемерово"))
