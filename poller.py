@@ -153,10 +153,13 @@ def iter_unanswered_job_applications(
     *,
     now: datetime | None = None,
     max_age_hours: int = 24,
+    not_before_timestamp: float | None = None,
 ) -> Iterator[tuple[str, ConversationState, dict[str, Any], str, str | None, str | None]]:
     """Find recent application chats that have never received an outgoing text."""
     current = now or datetime.now(timezone.utc)
     cutoff = current.timestamp() - max(1, max_age_hours) * 3600
+    if not_before_timestamp is not None:
+        cutoff = max(cutoff, not_before_timestamp)
     for chat in chats:
         chat_id = str(chat.get("id") or "").strip()
         if not chat_id:
@@ -704,17 +707,37 @@ def main() -> None:
         )
         repaired, returned = reconcile_incomplete_applications(client, store)
         recovered_unanswered = 0
-        for values in iter_unanswered_job_applications(
-            client, initial_chats, store
-        ):
+        recovery_key = "unanswered_recovery_started_at_v1"
+        recovery_started_at = store.get_metadata(recovery_key)
+        if recovery_started_at is None:
+            store.set_metadata(
+                recovery_key,
+                str(datetime.now(timezone.utc).timestamp()),
+            )
+            print(
+                "Unanswered application recovery baseline initialized; "
+                "pre-existing applications were skipped"
+            )
+        else:
             try:
-                process_chat_message(client, workflow, store, *values)
-                recovered_unanswered += 1
-            except Exception as exc:
-                print(
-                    f"unanswered application recovery error "
-                    f"chat_id={values[0]}: {exc}"
-                )
+                recovery_cutoff = float(recovery_started_at)
+            except ValueError:
+                recovery_cutoff = datetime.now(timezone.utc).timestamp()
+                store.set_metadata(recovery_key, str(recovery_cutoff))
+            for values in iter_unanswered_job_applications(
+                client,
+                initial_chats,
+                store,
+                not_before_timestamp=recovery_cutoff,
+            ):
+                try:
+                    process_chat_message(client, workflow, store, *values)
+                    recovered_unanswered += 1
+                except Exception as exc:
+                    print(
+                        f"unanswered application recovery error "
+                        f"chat_id={values[0]}: {exc}"
+                    )
         if migrated_completed:
             print(f"Migrated legacy completed chats: {migrated_completed}")
         if repaired or returned:
