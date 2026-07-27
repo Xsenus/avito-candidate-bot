@@ -61,6 +61,8 @@ def iter_new_chat_messages(
     client: AvitoClient,
     chats: list[dict[str, Any]],
     store: SQLiteStateStore,
+    *,
+    not_before_timestamp: float | None = None,
 ) -> Iterator[tuple[str, ConversationState, dict[str, Any], str, str | None, str | None]]:
     for chat in chats:
         chat_id = str(chat.get("id") or "").strip()
@@ -86,6 +88,48 @@ def iter_new_chat_messages(
         )
         cursor = store.get_message_cursor(chat_id)
         only_last_message = False
+
+        # The Avito chat list is limited and can expose older pages only after
+        # other chats move in the ordering. Fail closed for a chat that was not
+        # present during installation: it is eligible for automation only when
+        # its latest vacancy response was created after the installation
+        # boundary. This prevents historical conversations from being restarted
+        # merely because they appear in a later polling cycle.
+        if cursor is None and not_before_timestamp is not None:
+            latest_application = next(
+                (
+                    message
+                    for message in reversed(messages)
+                    if is_job_application_system_message(message)
+                ),
+                None,
+            )
+            application_created = (
+                normalized_created(latest_application)
+                if latest_application is not None
+                else None
+            )
+            if (
+                application_created is None
+                or application_created < not_before_timestamp
+            ):
+                state.step = "done"
+                state.application_status = "manual"
+                state.last_error = None
+                state.next_retry_at = None
+                state.notes["preinstallation_chat_quarantined"] = "true"
+                store.save(chat_id, state)
+                for message in messages:
+                    message_id = str(message.get("id") or "").strip()
+                    if not message_id:
+                        continue
+                    key = message_key(message)
+                    store.mark_message_seen(
+                        chat_id,
+                        message_id,
+                        key[0] if key else None,
+                    )
+                continue
 
         # Migrate databases created before per-chat cursors existed. A fetched
         # processed message is a reliable watermark; unprocessed messages older
@@ -752,9 +796,10 @@ def main() -> None:
         recovery_key = "unanswered_recovery_started_at_v1"
         recovery_started_at = store.get_metadata(recovery_key)
         if recovery_started_at is None:
+            recovery_cutoff = datetime.now(timezone.utc).timestamp()
             store.set_metadata(
                 recovery_key,
-                str(datetime.now(timezone.utc).timestamp()),
+                str(recovery_cutoff),
             )
             print(
                 "Unanswered application recovery baseline initialized; "
@@ -816,7 +861,12 @@ def main() -> None:
                 unread_only=False, limit=CHAT_PAGE_LIMIT
             )
             failed_chats: set[str] = set()
-            for values in iter_new_chat_messages(client, chats, store):
+            for values in iter_new_chat_messages(
+                client,
+                chats,
+                store,
+                not_before_timestamp=recovery_cutoff,
+            ):
                 if values[0] in failed_chats:
                     continue
                 try:

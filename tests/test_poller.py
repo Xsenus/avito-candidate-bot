@@ -167,6 +167,59 @@ def test_unanswered_application_before_installation_boundary_is_not_recovered(
     store.close()
 
 
+def test_preinstallation_chat_discovered_later_is_quarantined(tmp_path):
+    store = SQLiteStateStore(tmp_path / "late-history.sqlite3")
+    messages = [
+        job_application_message("old-job", 1_000, "job"),
+        {
+            "id": "later-answer",
+            "created": 1_200,
+            "direction": "in",
+            "type": "text",
+            "content": {"text": "да"},
+        },
+    ]
+    candidate_chat = chat()
+    candidate_chat["last_message"] = messages[-1]
+
+    yielded = list(
+        iter_new_chat_messages(
+            FakeHistoryClient(messages),
+            [candidate_chat],
+            store,
+            not_before_timestamp=1_100,
+        )
+    )
+
+    state = store.load("chat-1")
+    assert yielded == []
+    assert state.step == "done"
+    assert state.application_status == "manual"
+    assert state.notes["preinstallation_chat_quarantined"] == "true"
+    assert all(store.is_processed("chat-1", message["id"]) for message in messages)
+    store.close()
+
+
+def test_postinstallation_application_discovered_later_is_processed(tmp_path):
+    store = SQLiteStateStore(tmp_path / "late-new-application.sqlite3")
+    message = job_application_message("new-job", 1_200, "job")
+    candidate_chat = chat()
+    candidate_chat["last_message"] = message
+
+    yielded = list(
+        iter_new_chat_messages(
+            FakeHistoryClient([message]),
+            [candidate_chat],
+            store,
+            not_before_timestamp=1_100,
+        )
+    )
+
+    assert [values[3] for values in yielded] == ["new-job"]
+    assert store.load("chat-1").application_status == "collecting"
+    store.close()
+
+
 def test_recovery_skips_chat_with_an_outgoing_reply(tmp_path):
     from datetime import datetime, timezone
 
