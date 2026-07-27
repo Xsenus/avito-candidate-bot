@@ -152,6 +152,30 @@ def test_moscow_candidate_selects_warehouse_before_date():
     assert "день недели" in reply
 
 
+def test_address_question_before_warehouse_choice_repeats_listing_options():
+    state = ConversationState(step="awaiting_warehouse", city="Москва")
+
+    reply = handle_user_message(state, "А где находится склад?")
+
+    assert state.step == "awaiting_warehouse"
+    assert state.address is None
+    assert "Адрес зависит от выбранного склада" in reply
+    assert "1. Железнодорожный" in reply
+    assert "8. СЦ Тарный" in reply
+    assert "Дмитровское шоссе 157с1" not in reply
+    assert len(reply) <= 1000
+
+
+def test_address_question_after_warehouse_choice_returns_selected_address():
+    state = ConversationState(step="awaiting_warehouse", city="Москва")
+    handle_user_message(state, "4")
+
+    reply = handle_user_message(state, "А где находится склад?")
+
+    assert state.step == "awaiting_datetime"
+    assert reply == "Адрес склада: Курьяновская набережная, 6с2"
+
+
 def test_invalid_warehouse_choice_does_not_advance():
     state = ConversationState(step="awaiting_warehouse", city="Санкт-Петербург")
 

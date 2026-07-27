@@ -168,6 +168,15 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
 
     if asks_for_address(cleaned):
         state.city = normalize_city(city_hint) or state.city
+        if state.step == "awaiting_warehouse":
+            state.address = None
+            prompt = warehouse_prompt_for_city(state.city)
+            if prompt:
+                return (
+                    "Адрес зависит от выбранного склада. "
+                    "Укажите удобный склад номером:\n\n"
+                    f"{prompt}"
+                )
         address = state.address or resolve_address(state.city)
         state.address = address
         return WAREHOUSE_ADDRESS_MESSAGE.format(address=address)
