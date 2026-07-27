@@ -16,6 +16,10 @@ def test_moscow_region_cities_use_eight_warehouses(city):
     prompt = warehouse_prompt_for_city(city)
     assert "1. Железнодорожный" in prompt
     assert "8. СЦ Тарный" in prompt
+    assert "🕥 Стажировка в 7:00:00" in prompt
+    assert "🕥 Стажировка в 8:30:00" in prompt
+    assert "Напишите номер подходящего склада (1–8)" in prompt
+    assert len(prompt) <= 1000
 
 
 @pytest.mark.parametrize(
@@ -25,8 +29,12 @@ def test_saint_petersburg_region_uses_two_warehouses(city):
     assert warehouse_group_for_city(city) == "saint_petersburg"
     prompt = warehouse_prompt_for_city(city)
     assert "1. Троицкий" in prompt
-    assert "2. Бугры" in prompt
+    assert "2. Запад" in prompt
+    assert "🕥 Стажировка в 7:30:00" in prompt
+    assert "🕥 Стажировка в 7:00:00" in prompt
+    assert "Напишите номер подходящего склада (1–2)" in prompt
     assert "3." not in prompt
+    assert len(prompt) <= 1000
 
 
 @pytest.mark.parametrize(

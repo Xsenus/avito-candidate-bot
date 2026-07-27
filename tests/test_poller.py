@@ -298,9 +298,19 @@ def test_first_seen_old_chat_processes_only_current_unread_message(tmp_path):
 
 
 def test_known_bot_prompts_map_to_expected_steps():
-    from avito_bot.conversation import ADDRESS_MESSAGE, INTERNSHIP_MESSAGE
+    from avito_bot.conversation import (
+        ADDRESS_MESSAGE,
+        FOLLOW_UP_MESSAGE,
+        INITIAL_MESSAGE,
+    )
+    from avito_bot.warehouses import warehouse_prompt_for_city
 
-    assert infer_step_from_bot_message(INTERNSHIP_MESSAGE) == "awaiting_staj"
+    assert infer_step_from_bot_message(INITIAL_MESSAGE) == "sending_intro"
+    assert infer_step_from_bot_message(FOLLOW_UP_MESSAGE) == "sending_intro"
+    assert (
+        infer_step_from_bot_message(warehouse_prompt_for_city("Москва"))
+        == "awaiting_warehouse"
+    )
     assert infer_step_from_bot_message(ADDRESS_MESSAGE) == "awaiting_datetime"
     assert infer_step_from_bot_message("И номер") == "awaiting_phone"
     assert (
@@ -485,7 +495,96 @@ class FakeInvitationSource:
         return InvitationCatalog.from_csv(
             '"СЦ","Текст сообщения"\n'
             '"Кемерово","Приглашение на ДАТА, Кемерово"\n'
+            '"Бугры","Приглашение на ДАТА, Бугры"\n'
         )
+
+
+def test_initial_application_sends_three_messages_and_waits_for_warehouse(
+    tmp_path,
+):
+    store = SQLiteStateStore(tmp_path / "three-messages.sqlite3")
+    client = FakeClient()
+    workflow = CandidateWorkflow(FakeForm(), FakeInvitationSource())
+
+    process_chat_message(
+        client,
+        workflow,
+        store,
+        "chat-moscow-intro",
+        ConversationState(),
+        {"content": {"text": "system application"}},
+        "intro-message",
+        "Мытищи",
+        "moscow-item",
+    )
+
+    restored = store.load("chat-moscow-intro")
+    assert len(client.messages) == 3
+    assert client.messages[0][1].startswith("1. 🚚 Водитель")
+    assert client.messages[1][1].startswith("🛠 О работе")
+    assert client.messages[2][1].startswith("Подобрали для вас склады")
+    assert restored.step == "awaiting_warehouse"
+    assert restored.intro_messages_sent == 3
+    assert store.is_processed("chat-moscow-intro", "intro-message")
+    store.close()
+
+
+def test_interrupted_initial_sequence_resumes_with_only_missing_message(
+    tmp_path,
+):
+    store = SQLiteStateStore(tmp_path / "resume-intro.sqlite3")
+    state = ConversationState(
+        step="sending_intro",
+        city="Москва",
+        intro_messages_sent=2,
+        intro_trigger_message_id="intro-message",
+    )
+    store.save("chat-resume", state)
+    client = FakeClient()
+    workflow = CandidateWorkflow(FakeForm(), FakeInvitationSource())
+
+    process_chat_message(
+        client,
+        workflow,
+        store,
+        "chat-resume",
+        store.load("chat-resume"),
+        {"content": {"text": "system application"}},
+        "intro-message",
+        "Москва",
+        "moscow-item",
+    )
+
+    restored = store.load("chat-resume")
+    assert len(client.messages) == 1
+    assert client.messages[0][1].startswith("Подобрали для вас склады")
+    assert restored.step == "awaiting_warehouse"
+    assert restored.intro_trigger_message_id is None
+    store.close()
+
+
+def test_unsupported_city_is_marked_without_outgoing_messages(tmp_path):
+    store = SQLiteStateStore(tmp_path / "unsupported-city.sqlite3")
+    client = FakeClient()
+    workflow = CandidateWorkflow(FakeForm(), FakeInvitationSource())
+
+    process_chat_message(
+        client,
+        workflow,
+        store,
+        "chat-unsupported",
+        ConversationState(),
+        {"content": {"text": "system application"}},
+        "unsupported-message",
+        "Кемерово",
+        "other-item",
+    )
+
+    restored = store.load("chat-unsupported")
+    assert client.messages == []
+    assert restored.step == "unsupported"
+    assert store.is_processed("chat-unsupported", "unsupported-message")
+    store.close()
 
 
 def test_phone_triggers_form_then_invitation_and_persists_completion(tmp_path):
@@ -531,11 +630,6 @@ def test_complete_candidate_journey_survives_state_reload(tmp_path, monkeypatch)
     client = FakeClient()
     form = FakeForm()
     workflow = CandidateWorkflow(form, FakeInvitationSource())
-    delayed = []
-    monkeypatch.setattr(
-        "poller.schedule_delayed_message",
-        lambda client, chat_id, text, delay: delayed.append((chat_id, text, delay)),
-    )
     def fixed_internship_date(value):
         if "четверг" in value.lower():
             return __import__("datetime").date(2026, 7, 23)
@@ -546,9 +640,8 @@ def test_complete_candidate_journey_survives_state_reload(tmp_path, monkeypatch)
     )
 
     answers = [
-        "Здравствуйте",
-        "Да, интересно",
-        "Да, готов",
+        "system application",
+        "2",
         "в четверг",
         "Травкин Виталий",
         "8 (927) 206-97-01",
@@ -562,7 +655,7 @@ def test_complete_candidate_journey_survives_state_reload(tmp_path, monkeypatch)
             store.load("chat-journey"),
             {"content": {"text": answer}},
             f"message-{index}",
-            "Кемерово",
+            "Санкт-Петербург",
             "8288057518",
         )
 
@@ -574,13 +667,15 @@ def test_complete_candidate_journey_survives_state_reload(tmp_path, monkeypatch)
     assert restored.phone == "+79272069701"
     assert restored.internship_date == "23.07.2026"
     assert len(form.applications) == 1
-    assert form.applications[0].warehouse == "СЦ Кемерово"
+    assert form.applications[0].warehouse == "СЦ Бугры"
     assert form.applications[0].tariff == "Драйв"
     assert form.applications[0].citizenship == "Российская Федерация"
-    assert client.messages[-1][1].startswith("Приглашение на 23.07., Кемерово")
+    assert client.messages[0][1].startswith("1. 🚚 Водитель")
+    assert client.messages[1][1].startswith("🛠 О работе")
+    assert "2. Запад" in client.messages[2][1]
+    assert client.messages[-1][1].startswith("Приглашение на 23.07., Бугры")
     assert client.messages[-1][1].endswith("До встречи!")
-    assert len(delayed) == 1
-    assert all(store.is_processed("chat-journey", f"message-{i}") for i in range(1, 7))
+    assert all(store.is_processed("chat-journey", f"message-{i}") for i in range(1, 6))
     store.close()
 
 
@@ -598,16 +693,13 @@ def test_moscow_journey_persists_selected_warehouse_and_uses_it_in_form(
     client = FakeClient()
     form = FakeForm()
     workflow = CandidateWorkflow(form, MoscowInvitationSource())
-    monkeypatch.setattr("poller.schedule_delayed_message", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "avito_bot.conversation.resolve_internship_date",
         lambda value: __import__("datetime").date(2026, 7, 23),
     )
 
     answers = [
-        "Здравствуйте",
-        "Да",
-        "Да",
+        "system application",
         "4",
         "четверг",
         "Иванов Иван",

@@ -20,11 +20,10 @@ from avito_bot.conversation import (
     CONFIRMATION_MESSAGE,
     FOLLOW_UP_MESSAGE,
     INITIAL_MESSAGE,
-    INTERNSHIP_MESSAGE,
     STORE_SELECTION_MESSAGE,
     ConversationState,
     handle_user_message,
-    schedule_delayed_message,
+    initial_messages_for_city,
 )
 from avito_bot.candidate import normalize_phone, resolve_internship_date, split_full_name
 from avito_bot.storage import SQLiteStateStore
@@ -406,9 +405,9 @@ def initialize_message_cursor(
 def infer_step_from_bot_message(text: str | None) -> str | None:
     normalized = (text or "").strip()
     if normalized in {INITIAL_MESSAGE.strip(), FOLLOW_UP_MESSAGE.strip()}:
-        return "awaiting_interest"
-    if normalized == INTERNSHIP_MESSAGE.strip():
-        return "awaiting_staj"
+        return "sending_intro"
+    if normalized.startswith("Подобрали для вас склады"):
+        return "awaiting_warehouse"
     if normalized in {ADDRESS_MESSAGE.strip(), STORE_SELECTION_MESSAGE.strip()}:
         return "awaiting_datetime"
     if normalized == CONFIRMATION_MESSAGE.strip():
@@ -561,6 +560,37 @@ def restore_collected_fields(
                 pass
 
 
+def send_initial_sequence(
+    client: AvitoClient,
+    store: SQLiteStateStore,
+    chat_id: str,
+    state: ConversationState,
+    message_id: str,
+) -> bool:
+    messages = initial_messages_for_city(state.city)
+    if not messages:
+        state.step = "unsupported"
+        state.intro_messages_sent = 0
+        state.intro_trigger_message_id = None
+        store.save(chat_id, state)
+        return False
+
+    if state.step == "idle":
+        state.step = "sending_intro"
+        state.intro_messages_sent = 0
+        state.intro_trigger_message_id = message_id
+        store.save(chat_id, state)
+
+    for outgoing_text in messages[state.intro_messages_sent :]:
+        client.send_message(chat_id, outgoing_text)
+        state.intro_messages_sent += 1
+        store.save(chat_id, state)
+
+    state.step = "awaiting_warehouse"
+    store.save(chat_id, state)
+    return True
+
+
 def process_chat_message(
     client: AvitoClient,
     workflow: CandidateWorkflow,
@@ -577,12 +607,44 @@ def process_chat_message(
     state.city = city or state.city
     state.item_id = item_id or state.item_id
 
+    if state.step in {"idle", "sending_intro"}:
+        reply_sent = send_initial_sequence(
+            client,
+            store,
+            chat_id,
+            state,
+            message_id,
+        )
+        store.mark_message_seen(
+            chat_id,
+            message_id,
+            normalized_created(message),
+        )
+        state.intro_trigger_message_id = None
+        store.save(chat_id, state)
+        print(
+            f"message processed chat_id={chat_id} message_id={message_id} "
+            f"reply_sent={reply_sent} step={state.step} "
+            f"application_status={state.application_status}"
+        )
+        return
+
+    if (
+        state.step == "awaiting_warehouse"
+        and state.intro_trigger_message_id == message_id
+    ):
+        store.mark_message_seen(
+            chat_id,
+            message_id,
+            normalized_created(message),
+        )
+        state.intro_trigger_message_id = None
+        store.save(chat_id, state)
+        return
+
     reply = handle_user_message(state, text, city_hint=state.city)
     if reply:
         client.send_message(chat_id, reply)
-        if reply == INITIAL_MESSAGE:
-            delay = int(os.getenv("FOLLOW_UP_DELAY_SECONDS", "5"))
-            schedule_delayed_message(client, chat_id, FOLLOW_UP_MESSAGE, delay=delay)
 
     store.save(chat_id, state)
     store.mark_message_seen(chat_id, message_id, normalized_created(message))
