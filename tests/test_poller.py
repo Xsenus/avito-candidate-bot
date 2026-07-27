@@ -577,7 +577,7 @@ def regional_catalog():
     )
 
 
-def test_regional_application_immediately_sends_three_messages(tmp_path):
+def test_regional_application_immediately_sends_four_messages(tmp_path):
     store = SQLiteStateStore(tmp_path / "regional-intro.sqlite3")
     client = FakeClient()
     workflow = CandidateWorkflow(FakeForm(), FakeInvitationSource())
@@ -597,17 +597,20 @@ def test_regional_application_immediately_sends_three_messages(tmp_path):
     )
 
     restored = store.load("chat-regional")
-    assert len(client.messages) == 3
+    assert len(client.messages) == 4
     assert client.messages[0][1].startswith("1. 🚚 Водитель")
     assert client.messages[1][1].startswith("🛠 О работе")
     assert "ул. Подсолнечная, 44" in client.messages[2][1]
     assert "10:30:00" in client.messages[2][1]
+    assert client.messages[3][1].startswith(
+        "Стажировка каждый день в 10:30:00"
+    )
     assert restored.step == "awaiting_datetime"
     assert restored.service_center == "Краснодар"
     assert restored.warehouse_selection_source == "regional_catalog"
     assert restored.address.endswith("ул. Подсолнечная, 44")
     assert restored.internship_time == "10:30:00"
-    assert restored.regional_intro_messages_sent == 3
+    assert restored.regional_intro_messages_sent == 4
     assert restored.regional_intro_trigger_message_id is None
     assert store.is_processed("chat-regional", "regional-job")
     store.close()
@@ -659,11 +662,12 @@ def test_regional_intro_resumes_after_interrupted_send(tmp_path):
     )
 
     restored = store.load("chat-regional")
-    assert len(resumed.messages) == 2
+    assert len(resumed.messages) == 3
     assert resumed.messages[0][1].startswith("🛠 О работе")
     assert resumed.messages[1][1].startswith("Подобрали для вас склад")
+    assert resumed.messages[2][1].startswith("Стажировка каждый день в 8:00:00")
     assert restored.step == "awaiting_datetime"
-    assert restored.regional_intro_messages_sent == 3
+    assert restored.regional_intro_messages_sent == 4
     assert store.is_processed("chat-regional", "regional-job")
     store.close()
 

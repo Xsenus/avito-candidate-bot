@@ -68,19 +68,23 @@ def test_regional_messages_match_requested_conditions():
         )
     )
 
-    assert len(messages) == 3
+    assert len(messages) == 4
     assert messages[0].startswith("1. 🚚 Водитель")
     assert "от 4 400 ₽ за рейс" in messages[0]
     assert "Доход до 160 000 ₽ в месяц" in messages[0]
     assert messages[1].startswith("🛠 О работе")
     assert "📍 Адрес: г. Белгород, ул Мичурина 104А" in messages[2]
-    assert messages[2].count("7:45:00") == 2
-    assert messages[2].endswith("например: Вторник")
+    assert messages[2].count("7:45:00") == 1
+    assert messages[2].endswith("7:45:00")
+    assert messages[3] == (
+        "Стажировка каждый день в 7:45:00, на какой день вас записать? "
+        "Укажите день недели, например: Вторник"
+    )
     assert all(len(message) <= 1000 for message in messages)
 
 
 def test_first_two_regional_messages_keep_customer_spacing():
-    first, second, _ = regional_initial_messages(
+    first, second, _, _ = regional_initial_messages(
         RegionalLocation(
             city="Белгород",
             service_center="Белгород",

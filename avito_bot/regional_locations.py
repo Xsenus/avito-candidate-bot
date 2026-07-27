@@ -165,7 +165,9 @@ class GoogleSheetRegionalLocationSource:
         return catalog
 
 
-def regional_initial_messages(location: RegionalLocation) -> tuple[str, str, str]:
+def regional_initial_messages(
+    location: RegionalLocation,
+) -> tuple[str, str, str, str]:
     first = (
         "1. 🚚 Водитель в Яндекс Маркет (на авто компании)\n\n"
         "Мы предлагаем работу на комфортных фургонах Ford Transit (МКПП). "
@@ -194,11 +196,13 @@ def regional_initial_messages(location: RegionalLocation) -> tuple[str, str, str
     third = (
         "Подобрали для вас склад в вашем городе:\n\n"
         f"📍 Адрес: {location.address}\n\n"
-        f"🕥 Стажировка начинается в {location.internship_time}\n\n"
+        f"🕥 Стажировка начинается в {location.internship_time}"
+    )
+    fourth = (
         f"Стажировка каждый день в {location.internship_time}, на какой день "
         "вас записать? Укажите день недели, например: Вторник"
     )
-    messages = (first, second, third)
+    messages = (first, second, third, fourth)
     if any(len(message) > AVITO_TEXT_LIMIT for message in messages):
         raise ValueError("Региональное сообщение превышает лимит Avito")
     return messages
