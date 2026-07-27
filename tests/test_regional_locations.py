@@ -79,6 +79,34 @@ def test_regional_messages_match_requested_conditions():
     assert all(len(message) <= 1000 for message in messages)
 
 
+def test_first_two_regional_messages_keep_customer_spacing():
+    first, second, _ = regional_initial_messages(
+        RegionalLocation(
+            city="Белгород",
+            service_center="Белгород",
+            address="г. Белгород, ул Мичурина 104А",
+            internship_time="7:45:00",
+        )
+    )
+
+    assert first.startswith(
+        "1. 🚚 Водитель в Яндекс Маркет (на авто компании)\n\n"
+        "Мы предлагаем работу"
+    )
+    assert "\n\n💰 Условия и доход\n\n• Ваша прибыль" in first
+    assert "\n\n• Прозрачная оплата" in first
+    assert "\n\n• Высокий потенциал" in first
+    assert second.startswith("🛠 О работе\n\n• Задачи")
+    assert "\n\n• Комфорт" in second
+    assert "\n\n• График" in second
+    assert "\n\n📝 Что требуется от вас?\n\n• Стаж" in second
+    assert "\n\n❌ Мы убрали" in second
+    assert "\n\n✅ Вы выходите" in second
+    assert "\n\n📍 Обучение" in second
+    assert "\n\n\n" not in first
+    assert "\n\n\n" not in second
+
+
 class FakeResponse:
     text = SHEET_CSV
 
