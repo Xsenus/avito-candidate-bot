@@ -39,6 +39,19 @@ def test_catalog_reuses_existing_city_aliases(city):
     assert location.internship_time == "10:30:00"
 
 
+def test_kstovo_uses_nizhny_novgorod_location():
+    catalog = RegionalLocationCatalog.from_csv(
+        SHEET_CSV
+        + 'Нижний Новгород,,,,,,,,,Нижний Новгород,'
+        '"Нижний Новгород, Московское шоссе, 52",,,,,10:30:00\n'
+    )
+
+    location = catalog.resolve("Кстово", "item")
+
+    assert location.service_center == "Нижний Новгород"
+    assert location.internship_time == "10:30:00"
+
+
 def test_item_override_is_used_before_city():
     catalog = RegionalLocationCatalog.from_csv(SHEET_CSV)
 
