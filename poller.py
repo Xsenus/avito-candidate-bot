@@ -51,6 +51,8 @@ def iter_new_chat_messages(
     client: AvitoClient,
     chats: list[dict[str, Any]],
     store: SQLiteStateStore,
+    *,
+    manual_takeover_after: float | None = None,
 ) -> Iterator[tuple[str, ConversationState, dict[str, Any], str, str | None, str | None]]:
     for chat in chats:
         chat_id = str(chat.get("id") or "").strip()
@@ -93,7 +95,10 @@ def iter_new_chat_messages(
             else:
                 only_last_message = True
 
-        terminal = state.application_status == "completed" or state.step == "done"
+        terminal = state.application_status in {"completed", "manual"} or state.step in {
+            "done",
+            "manual_takeover",
+        }
         for message in messages:
             message_id = str(message.get("id") or "").strip()
             if not message_id or store.is_processed(chat_id, message_id):
@@ -116,6 +121,25 @@ def iter_new_chat_messages(
                 store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
             if message.get("direction") != "in":
+                created = normalized_created(message)
+                if (
+                    manual_takeover_after is not None
+                    and message.get("type") == "text"
+                    and created is not None
+                    and created >= manual_takeover_after
+                    and not store.is_bot_outgoing(chat_id, message_id)
+                ):
+                    state.step = "manual_takeover"
+                    state.application_status = "manual"
+                    state.last_error = None
+                    state.manual_takeover_at = datetime.now(timezone.utc).isoformat()
+                    state.manual_takeover_message_id = message_id
+                    store.save(chat_id, state)
+                    terminal = True
+                    print(
+                        f"manual takeover chat_id={chat_id} "
+                        f"message_id={message_id}; bot paused"
+                    )
                 store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
 
@@ -215,6 +239,33 @@ def message_key(message: dict[str, Any]) -> tuple[float, str] | None:
     return (created, message_id) if created is not None and message_id else None
 
 
+def sent_message_id(response: Any) -> str | None:
+    if not isinstance(response, dict):
+        return None
+    direct = str(response.get("id") or "").strip()
+    if direct:
+        return direct
+    nested = response.get("message")
+    if isinstance(nested, dict):
+        nested_id = str(nested.get("id") or "").strip()
+        if nested_id:
+            return nested_id
+    return None
+
+
+def send_bot_message(
+    client: AvitoClient,
+    store: SQLiteStateStore,
+    chat_id: str,
+    text: str,
+) -> dict[str, Any] | None:
+    response = client.send_message(chat_id, text)
+    message_id = sent_message_id(response)
+    if message_id:
+        store.mark_bot_outgoing(chat_id, message_id)
+    return response
+
+
 def oldest_first(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Avito returns newest first; use timestamps when available for stable ordering."""
     if messages and all(isinstance(message.get("created"), (int, float)) for message in messages):
@@ -252,7 +303,9 @@ def complete_pending_application(
         return False
 
     if not state.processing_notice_sent:
-        client.send_message(
+        send_bot_message(
+            client,
+            store,
             chat_id,
             "Спасибо, данные получили. Завершаю запись — это может занять до минуты.",
         )
@@ -272,7 +325,7 @@ def complete_pending_application(
         return False
 
     try:
-        client.send_message(chat_id, invitation)
+        send_bot_message(client, store, chat_id, invitation)
     except Exception as exc:
         schedule_retry(store, chat_id, state, exc)
         print(f"invitation error chat_id={chat_id}: {exc}")
@@ -585,7 +638,7 @@ def send_initial_sequence(
         store.save(chat_id, state)
 
     for outgoing_text in messages[state.intro_messages_sent :]:
-        client.send_message(chat_id, outgoing_text)
+        send_bot_message(client, store, chat_id, outgoing_text)
         state.intro_messages_sent += 1
         store.save(chat_id, state)
 
@@ -647,7 +700,7 @@ def process_chat_message(
 
     reply = handle_user_message(state, text, city_hint=state.city)
     if reply:
-        client.send_message(chat_id, reply)
+        send_bot_message(client, store, chat_id, reply)
 
     store.save(chat_id, state)
     store.mark_message_seen(chat_id, message_id, normalized_created(message))
@@ -679,6 +732,27 @@ def main() -> None:
     )
     state_path = os.getenv("STATE_DB_PATH", str(Path(PROJECT_ROOT) / "data" / "bot.sqlite3"))
     store = SQLiteStateStore(state_path)
+    manual_takeover_after = None
+    if os.getenv("PAUSE_ON_MANUAL_OUTGOING", "false").strip().lower() == "true":
+        manual_takeover_key = "manual_takeover_started_at_v1"
+        configured_boundary = store.get_metadata(manual_takeover_key)
+        if configured_boundary is None:
+            manual_takeover_after = datetime.now(timezone.utc).timestamp()
+            store.set_metadata(manual_takeover_key, str(manual_takeover_after))
+            print(
+                "Manual takeover baseline initialized; "
+                "pre-existing outgoing messages were skipped"
+            )
+        else:
+            try:
+                manual_takeover_after = float(configured_boundary)
+            except ValueError:
+                manual_takeover_after = datetime.now(timezone.utc).timestamp()
+                store.set_metadata(
+                    manual_takeover_key,
+                    str(manual_takeover_after),
+                )
+        print("Manual takeover detection enabled")
     interrupted = store.quarantine_interrupted_submissions()
     if interrupted:
         print(
@@ -767,7 +841,12 @@ def main() -> None:
                 unread_only=False, limit=CHAT_PAGE_LIMIT
             )
             failed_chats: set[str] = set()
-            for values in iter_new_chat_messages(client, chats, store):
+            for values in iter_new_chat_messages(
+                client,
+                chats,
+                store,
+                manual_takeover_after=manual_takeover_after,
+            ):
                 if values[0] in failed_chats:
                     continue
                 try:

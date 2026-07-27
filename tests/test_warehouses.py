@@ -44,6 +44,15 @@ def test_saint_petersburg_region_uses_two_warehouses(city):
     assert len(prompt) <= 1000
 
 
+def test_troitsky_address_matches_customer_text_exactly():
+    prompt = warehouse_prompt_for_city("Санкт-Петербург")
+
+    assert (
+        "📍 г. Санкт-Петербург, Запорожская улица, д.12, строение 1, "
+        "Заезд через КПП по адресу: Проспект Обуховской Обороны, 295БЖ"
+    ) in prompt
+
+
 @pytest.mark.parametrize(
     "city",
     ["Кемерово", "Томск", "Омск", "Московская область", "Питерский район"],

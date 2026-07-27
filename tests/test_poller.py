@@ -14,6 +14,7 @@ from poller import (
     reconcile_incomplete_applications,
     restore_collected_fields,
     schedule_retry,
+    send_bot_message,
 )
 
 
@@ -51,6 +52,121 @@ def test_only_incoming_unprocessed_messages_are_yielded(tmp_path):
     assert len(list(iter_new_chat_messages(outgoing_client, [outgoing], store))) == 0
     store.mark_processed("chat-1", "message-1")
     assert len(list(iter_new_chat_messages(incoming_client, [incoming], store))) == 0
+    store.close()
+
+
+def test_new_manual_outgoing_message_pauses_only_that_chat(tmp_path):
+    store = SQLiteStateStore(tmp_path / "manual-takeover.sqlite3")
+    store.save(
+        "chat-1",
+        ConversationState(
+            step="awaiting_warehouse",
+            application_status="collecting",
+            city="Москва",
+        ),
+    )
+    store.mark_message_seen("chat-1", "previous-message", 100)
+    outgoing = {
+        "id": "manager-message",
+        "created": 200,
+        "direction": "out",
+        "type": "text",
+        "content": {"text": "Дальше отвечу вручную"},
+    }
+    candidate_chat = chat(direction="out")
+    candidate_chat["last_message"] = outgoing
+
+    yielded = list(
+        iter_new_chat_messages(
+            FakeHistoryClient([outgoing]),
+            [candidate_chat],
+            store,
+            manual_takeover_after=150,
+        )
+    )
+
+    restored = store.load("chat-1")
+    assert yielded == []
+    assert restored.step == "manual_takeover"
+    assert restored.application_status == "manual"
+    assert restored.manual_takeover_at
+    assert restored.manual_takeover_message_id == "manager-message"
+    assert store.is_processed("chat-1", "manager-message")
+    store.close()
+
+
+def test_manual_takeover_is_disabled_without_boundary(tmp_path):
+    store = SQLiteStateStore(tmp_path / "manual-disabled.sqlite3")
+    store.save(
+        "chat-1",
+        ConversationState(step="awaiting_warehouse", application_status="collecting"),
+    )
+    outgoing = {
+        "id": "manager-message",
+        "created": 200,
+        "direction": "out",
+        "type": "text",
+        "content": {"text": "Ручной ответ"},
+    }
+    candidate_chat = chat(direction="out")
+    candidate_chat["last_message"] = outgoing
+
+    assert not list(
+        iter_new_chat_messages(
+            FakeHistoryClient([outgoing]),
+            [candidate_chat],
+            store,
+        )
+    )
+
+    restored = store.load("chat-1")
+    assert restored.step == "awaiting_warehouse"
+    assert restored.application_status == "collecting"
+    assert restored.manual_takeover_message_id is None
+    store.close()
+
+
+def test_old_and_bot_outgoing_messages_do_not_trigger_manual_takeover(tmp_path):
+    store = SQLiteStateStore(tmp_path / "manual-filtering.sqlite3")
+    store.save(
+        "chat-1",
+        ConversationState(step="awaiting_warehouse", application_status="collecting"),
+    )
+    store.mark_message_seen("chat-1", "previous-message", 50)
+    store.mark_bot_outgoing("chat-1", "bot-message")
+    messages = [
+        {
+            "id": "bot-message",
+            "created": 200,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": "Сообщение бота"},
+        },
+        {
+            "id": "old-manager-message",
+            "created": 100,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": "Старое сообщение менеджера"},
+        },
+    ]
+    candidate_chat = chat(direction="out")
+    candidate_chat["last_message"] = messages[0]
+
+    assert not list(
+        iter_new_chat_messages(
+            FakeHistoryClient(messages),
+            [candidate_chat],
+            store,
+            manual_takeover_after=150,
+        )
+    )
+
+    restored = store.load("chat-1")
+    assert restored.step == "awaiting_warehouse"
+    assert restored.application_status == "collecting"
+    assert restored.manual_takeover_message_id is None
+    assert all(store.is_processed("chat-1", message["id"]) for message in messages)
     store.close()
 
 
@@ -504,6 +620,19 @@ class FakeClient:
 
     def send_message(self, chat_id, text):
         self.messages.append((chat_id, text))
+        return {"id": f"sent-{len(self.messages)}"}
+
+
+def test_send_bot_message_tracks_returned_avito_message_id(tmp_path):
+    store = SQLiteStateStore(tmp_path / "sent-message.sqlite3")
+    client = FakeClient()
+
+    response = send_bot_message(client, store, "chat-1", "Сообщение бота")
+
+    assert response == {"id": "sent-1"}
+    assert client.messages == [("chat-1", "Сообщение бота")]
+    assert store.is_bot_outgoing("chat-1", "sent-1")
+    store.close()
 
 
 class FakeForm:

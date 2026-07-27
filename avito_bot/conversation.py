@@ -27,6 +27,8 @@ class ConversationState:
     intro_messages_sent: int = 0
     intro_trigger_message_id: str | None = None
     address: str | None = None
+    manual_takeover_at: str | None = None
+    manual_takeover_message_id: str | None = None
     date_time: str | None = None
     internship_date: str | None = None
     tariff: str = "Драйв"
