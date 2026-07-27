@@ -143,6 +143,30 @@ def test_recent_unanswered_application_can_be_recovered(tmp_path):
     store.close()
 
 
+def test_unanswered_application_before_installation_boundary_is_not_recovered(
+    tmp_path,
+):
+    from datetime import datetime, timezone
+
+    store = SQLiteStateStore(tmp_path / "recover-boundary.sqlite3")
+    message = job_application_message("old-job", 1_000, "job")
+    candidate_chat = chat()
+    candidate_chat["last_message"] = message
+
+    recovered = list(
+        iter_unanswered_job_applications(
+            FakeHistoryClient([message]),
+            [candidate_chat],
+            store,
+            now=datetime.fromtimestamp(1_200, timezone.utc),
+            not_before_timestamp=1_100,
+        )
+    )
+
+    assert recovered == []
+    store.close()
+
+
 def test_recovery_skips_chat_with_an_outgoing_reply(tmp_path):
     from datetime import datetime, timezone
 
