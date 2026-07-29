@@ -32,7 +32,9 @@ def test_catalog_parses_address_and_time_and_chooses_main_city_row():
     assert krasnodar.internship_time == "10:30:00"
 
 
-@pytest.mark.parametrize("city", ["Кущевская", "Кущёвская", "Ростов-на-Дону"])
+@pytest.mark.parametrize(
+    "city", ["Кущевская", "Кущёвская", "Ростов-на-Дону", "Аксай"]
+)
 def test_catalog_reuses_existing_city_aliases(city):
     location = RegionalLocationCatalog.from_csv(SHEET_CSV).resolve(city, "item")
 
