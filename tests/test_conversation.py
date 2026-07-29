@@ -149,7 +149,55 @@ def test_moscow_candidate_selects_warehouse_before_date():
     assert state.warehouse_choice == 4
     assert state.service_center == "Печатники"
     assert state.address == "Курьяновская набережная, 6с2"
+    assert state.internship_time == "7:30:00"
+    assert "каждый день в 7:30:00" in reply
     assert "день недели" in reply
+
+
+def test_selected_warehouse_uses_current_sheet_time(monkeypatch):
+    from avito_bot.warehouses import WarehouseOption
+
+    monkeypatch.setattr(
+        "avito_bot.conversation.parse_warehouse_choice",
+        lambda text, city: WarehouseOption(
+            3,
+            "Кувекино",
+            "Кувекино",
+            "Актуальный адрес",
+            "9:15:00",
+        ),
+    )
+    state = ConversationState(step="awaiting_warehouse", city="Москва")
+
+    reply = handle_user_message(state, "3")
+
+    assert state.internship_time == "9:15:00"
+    assert reply.startswith("Стажировка каждый день в 9:15:00,")
+
+
+def test_legacy_selected_state_recovers_warehouse_time():
+    state = ConversationState(
+        step="awaiting_arrival",
+        city="Москва",
+        warehouse_choice=6,
+        service_center="Строгино",
+    )
+
+    reply = handle_user_message(state, "Да")
+
+    assert state.step == "awaiting_datetime"
+    assert state.internship_time == "8:30:00"
+    assert reply.startswith("Стажировка каждый день в 8:30:00,")
+
+
+def test_legacy_state_without_warehouse_asks_for_selection():
+    state = ConversationState(step="awaiting_arrival", city="Санкт-Петербург")
+
+    reply = handle_user_message(state, "Да")
+
+    assert state.step == "awaiting_warehouse"
+    assert "Чтобы указать точное время стажировки" in reply
+    assert "1. Троицкий" in reply
 
 
 def test_address_question_before_warehouse_choice_repeats_listing_options():

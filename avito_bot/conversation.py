@@ -8,7 +8,11 @@ from typing import Any
 
 from .avito_client import AvitoClient
 from .candidate import normalize_phone, resolve_internship_date, split_full_name
-from .warehouses import parse_warehouse_choice, warehouse_prompt_for_city
+from .warehouses import (
+    parse_warehouse_choice,
+    warehouse_prompt_for_city,
+    warehouses_for_city,
+)
 
 
 @dataclass
@@ -24,6 +28,7 @@ class ConversationState:
     service_center: str | None = None
     warehouse_choice: int | None = None
     warehouse_selection_source: str | None = None
+    internship_time: str | None = None
     intro_messages_sent: int = 0
     intro_trigger_message_id: str | None = None
     address: str | None = None
@@ -134,14 +139,6 @@ FOLLOW_UP_MESSAGE = (
 
 
 
-ADDRESS_MESSAGE = (
-    "Стажировка каждый день в 8 утра, на какой день вас записать? Укажите день недели например: Вторник"
-)
-
-STORE_SELECTION_MESSAGE = (
-    "Стажировка каждый день в 8 утра, на какой день вас записать? Укажите день недели например: Вторник"
-   )
-
 CONFIRMATION_MESSAGE = (
     "Для пропуска пришлите Фамилию Имя, без пропуска вы не сможете попасть на склад. Напишите это сейчас"
 )
@@ -152,6 +149,27 @@ def initial_messages_for_city(city: str | None) -> tuple[str, ...]:
     if not warehouse_prompt:
         return ()
     return INITIAL_MESSAGE, FOLLOW_UP_MESSAGE, warehouse_prompt
+
+
+def internship_day_message(internship_time: str) -> str:
+    return (
+        f"Стажировка каждый день в {internship_time}, на какой день вас "
+        "записать? Укажите день недели например: Вторник"
+    )
+
+
+def selected_internship_time(state: ConversationState) -> str | None:
+    if state.internship_time:
+        return state.internship_time
+    for option in warehouses_for_city(state.city):
+        if (
+            state.warehouse_choice == option.number
+            or state.service_center == option.service_center
+            or state.address == option.address
+        ):
+            state.internship_time = option.internship_time
+            return option.internship_time
+    return None
 
 
 def handle_user_message(state: ConversationState, text: str, client: AvitoClient | None = None, chat_id: str | None = None, city_hint: str | None = None) -> str:
@@ -200,8 +218,9 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
         state.warehouse_selection_source = "candidate"
         state.service_center = choice.service_center
         state.address = choice.address
+        state.internship_time = choice.internship_time
         state.step = "awaiting_datetime"
-        return ADDRESS_MESSAGE
+        return internship_day_message(choice.internship_time)
 
     if state.step == "awaiting_arrival":
         if looks_like_datetime(cleaned):
@@ -210,9 +229,19 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
             state.step = "awaiting_full_name"
             return CONFIRMATION_MESSAGE
         if is_positive(cleaned):
-            state.step = "awaiting_datetime"
-            return STORE_SELECTION_MESSAGE.format(city=state.city or "вашем городе", address=state.address or ADDRESS_FALLBACK)
-        return "Стажировка каждый день в 8 утра на какой день вас записать? Укажите день недели например: Вторник"
+            internship_time = selected_internship_time(state)
+            if internship_time:
+                state.step = "awaiting_datetime"
+                return internship_day_message(internship_time)
+        prompt = warehouse_prompt_for_city(state.city)
+        if prompt:
+            state.step = "awaiting_warehouse"
+            return (
+                "Чтобы указать точное время стажировки, выберите склад "
+                "номером:\n\n"
+                f"{prompt}"
+            )
+        return ""
 
     if state.step == "awaiting_datetime":
         try:

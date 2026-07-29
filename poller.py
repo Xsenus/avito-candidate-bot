@@ -16,11 +16,9 @@ if PROJECT_ROOT not in sys.path:
 from avito_bot.avito_client import AvitoClient
 from avito_bot.alerts import emit_alert
 from avito_bot.conversation import (
-    ADDRESS_MESSAGE,
     CONFIRMATION_MESSAGE,
     FOLLOW_UP_MESSAGE,
     INITIAL_MESSAGE,
-    STORE_SELECTION_MESSAGE,
     ConversationState,
     handle_user_message,
     initial_messages_for_city,
@@ -471,7 +469,10 @@ def infer_step_from_bot_message(text: str | None) -> str | None:
         return "sending_intro"
     if normalized.startswith("Подобрали для вас склады"):
         return "awaiting_warehouse"
-    if normalized in {ADDRESS_MESSAGE.strip(), STORE_SELECTION_MESSAGE.strip()}:
+    if (
+        normalized.startswith("Стажировка каждый день в ")
+        and "на какой день вас записать?" in normalized
+    ):
         return "awaiting_datetime"
     if normalized == CONFIRMATION_MESSAGE.strip():
         return "awaiting_full_name"

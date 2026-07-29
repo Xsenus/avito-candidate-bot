@@ -17,6 +17,11 @@ from poller import (
     send_bot_message,
 )
 
+LEGACY_DAY_PROMPT = (
+    "Стажировка каждый день в 8 утра, на какой день вас записать? "
+    "Укажите день недели например: Вторник"
+)
+
 
 def chat(direction="in"):
     return {
@@ -438,11 +443,7 @@ def test_first_seen_old_chat_processes_only_current_unread_message(tmp_path):
 
 
 def test_known_bot_prompts_map_to_expected_steps():
-    from avito_bot.conversation import (
-        ADDRESS_MESSAGE,
-        FOLLOW_UP_MESSAGE,
-        INITIAL_MESSAGE,
-    )
+    from avito_bot.conversation import FOLLOW_UP_MESSAGE, INITIAL_MESSAGE
     from avito_bot.warehouses import warehouse_prompt_for_city
 
     assert infer_step_from_bot_message(INITIAL_MESSAGE) == "sending_intro"
@@ -451,7 +452,14 @@ def test_known_bot_prompts_map_to_expected_steps():
         infer_step_from_bot_message(warehouse_prompt_for_city("Москва"))
         == "awaiting_warehouse"
     )
-    assert infer_step_from_bot_message(ADDRESS_MESSAGE) == "awaiting_datetime"
+    assert infer_step_from_bot_message(LEGACY_DAY_PROMPT) == "awaiting_datetime"
+    assert (
+        infer_step_from_bot_message(
+            "Стажировка каждый день в 7:30:00, на какой день вас записать? "
+            "Укажите день недели например: Вторник"
+        )
+        == "awaiting_datetime"
+    )
     assert infer_step_from_bot_message("И номер") == "awaiting_phone"
     assert (
         infer_step_from_bot_message(
@@ -520,7 +528,7 @@ def test_existing_database_migrates_latest_legacy_final_message(tmp_path):
 
 
 def test_legacy_history_restores_date_name_and_phone():
-    from avito_bot.conversation import ADDRESS_MESSAGE, CONFIRMATION_MESSAGE
+    from avito_bot.conversation import CONFIRMATION_MESSAGE
 
     state = ConversationState()
     messages = [
@@ -529,7 +537,7 @@ def test_legacy_history_restores_date_name_and_phone():
             "created": 1784592000,
             "direction": "out",
             "type": "text",
-            "content": {"text": ADDRESS_MESSAGE},
+            "content": {"text": LEGACY_DAY_PROMPT},
         },
         {
             "id": "day-answer",
@@ -563,7 +571,7 @@ def test_legacy_history_restores_date_name_and_phone():
 
 
 def test_incomplete_pending_application_is_repaired_from_history(tmp_path):
-    from avito_bot.conversation import ADDRESS_MESSAGE, CONFIRMATION_MESSAGE
+    from avito_bot.conversation import CONFIRMATION_MESSAGE
 
     store = SQLiteStateStore(tmp_path / "reconcile.sqlite3")
     store.save(
@@ -579,7 +587,7 @@ def test_incomplete_pending_application_is_repaired_from_history(tmp_path):
             "created": 1784592000,
             "direction": "out",
             "type": "text",
-            "content": {"text": ADDRESS_MESSAGE},
+            "content": {"text": LEGACY_DAY_PROMPT},
         },
         {
             "created": 1784592060,
@@ -878,6 +886,7 @@ def test_moscow_journey_persists_selected_warehouse_and_uses_it_in_form(
     assert restored.warehouse_selection_source == "candidate"
     assert restored.service_center == "Печатники"
     assert restored.address == "Курьяновская набережная, 6с2"
+    assert restored.internship_time == "7:30:00"
     assert form.applications[0].warehouse == "СЦ Печатники"
     assert client.messages[-1][1].startswith("Вы записаны 23.07. на склад Печатники")
     store.close()
