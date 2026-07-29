@@ -32,6 +32,7 @@ from avito_bot.regional_locations import (
     DEFAULT_SHEET_ID as DEFAULT_REGIONAL_LOCATIONS_SHEET_ID,
     GoogleSheetRegionalLocationSource,
     RegionalLocationCatalog,
+    RefreshingRegionalLocationProvider,
     regional_initial_messages,
 )
 from avito_bot.service_centers import parse_service_center_overrides
@@ -751,20 +752,24 @@ def main() -> None:
             int(os.getenv("REGIONAL_LOCATIONS_TIMEOUT_SECONDS", "30")),
         ),
     )
+    regional_cache_path = os.getenv(
+        "REGIONAL_LOCATIONS_CACHE_PATH",
+        str(Path(PROJECT_ROOT) / "data" / "regional_locations.csv"),
+    )
+    regional_refresh_seconds = max(
+        60,
+        int(os.getenv("REGIONAL_LOCATIONS_REFRESH_SECONDS", "300")),
+    )
     try:
-        regional_locations = regional_source.load(
-            os.getenv(
-                "REGIONAL_LOCATIONS_CACHE_PATH",
-                str(
-                    Path(PROJECT_ROOT)
-                    / "data"
-                    / "regional_locations.csv"
-                ),
-            )
+        regional_provider = RefreshingRegionalLocationProvider(
+            regional_source,
+            regional_cache_path,
+            regional_refresh_seconds,
         )
     except Exception as exc:
         print(f"Failed to load regional locations: {exc}")
         return
+    regional_locations = regional_provider.catalog
     regional_overrides = parse_service_center_overrides(
         os.getenv("SERVICE_CENTER_OVERRIDES_JSON", "")
     )
@@ -772,7 +777,8 @@ def main() -> None:
     print(
         f"Starting poller with interval={interval}s state_db={state_path} "
         f"regional_locations={len(regional_locations)} "
-        f"regional_locations_cache={regional_source.last_load_used_cache}"
+        f"regional_locations_cache={regional_source.last_load_used_cache} "
+        f"regional_locations_refresh={regional_refresh_seconds}s"
     )
 
     try:
@@ -852,6 +858,24 @@ def main() -> None:
     )
     next_health_log = time.monotonic() + health_interval
     while True:
+        if time.monotonic() >= regional_provider.next_refresh_at:
+            if regional_provider.refresh_if_due():
+                regional_locations = regional_provider.catalog
+                if regional_source.last_load_used_cache:
+                    print(
+                        "WARNING: regional locations refresh used cached data; "
+                        "Google Sheet is temporarily unavailable"
+                    )
+                else:
+                    print(
+                        "Regional locations refreshed from Google Sheet: "
+                        f"{len(regional_locations)}"
+                    )
+            elif regional_provider.last_error is not None:
+                print(
+                    "WARNING: regional locations refresh failed; "
+                    f"keeping previous catalog: {regional_provider.last_error}"
+                )
         try:
             # A recruiter can open a chat before the next polling cycle. Avito
             # then removes it from the unread list even though the bot has not

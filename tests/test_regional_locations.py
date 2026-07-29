@@ -4,6 +4,7 @@ from avito_bot.regional_locations import (
     GoogleSheetRegionalLocationSource,
     RegionalLocation,
     RegionalLocationCatalog,
+    RefreshingRegionalLocationProvider,
     regional_initial_messages,
 )
 
@@ -188,3 +189,55 @@ def test_google_sheet_source_updates_and_falls_back_to_cache(tmp_path):
 
     assert cached_catalog.resolve("Белгород", "item").internship_time == "7:45:00"
     assert cached_source.last_load_used_cache
+
+
+def test_provider_refreshes_when_due_and_keeps_last_valid_catalog(tmp_path):
+    class MutableHttpClient:
+        def __init__(self):
+            self.text = SHEET_CSV
+            self.fail = False
+
+        def get(self, url, timeout):
+            if self.fail:
+                raise OSError("Google is temporarily unavailable")
+            response = FakeResponse()
+            response.text = self.text
+            return response
+
+    now = [0.0]
+    http = MutableHttpClient()
+    source = GoogleSheetRegionalLocationSource(http_client=http)
+    cache_path = tmp_path / "regional.csv"
+    provider = RefreshingRegionalLocationProvider(
+        source,
+        cache_path,
+        300,
+        clock=lambda: now[0],
+    )
+
+    assert (
+        provider.catalog.resolve("Краснодар", "item").internship_time
+        == "10:30:00"
+    )
+    http.text = SHEET_CSV.replace("10:30:00", "9:00:00")
+    now[0] = 299
+    assert not provider.refresh_if_due()
+    assert (
+        provider.catalog.resolve("Краснодар", "item").internship_time
+        == "10:30:00"
+    )
+
+    now[0] = 300
+    assert provider.refresh_if_due()
+    assert provider.catalog.resolve(
+        "Краснодар", "item"
+    ).internship_time == "9:00:00"
+
+    cache_path.unlink()
+    http.fail = True
+    now[0] = 600
+    assert not provider.refresh_if_due()
+    assert provider.last_error is not None
+    assert provider.catalog.resolve(
+        "Краснодар", "item"
+    ).internship_time == "9:00:00"

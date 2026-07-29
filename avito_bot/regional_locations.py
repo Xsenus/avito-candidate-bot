@@ -3,9 +3,11 @@ from __future__ import annotations
 import csv
 import io
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 import requests
 
@@ -19,8 +21,14 @@ AVITO_TEXT_LIMIT = 1000
 TIME_PATTERN = re.compile(r"\d{1,2}:\d{2}:\d{2}")
 
 
+class HttpResponse(Protocol):
+    text: str
+
+    def raise_for_status(self) -> None: ...
+
+
 class HttpClient(Protocol):
-    def get(self, url: str, timeout: int): ...
+    def get(self, url: str, *, timeout: int) -> HttpResponse: ...
 
 
 @dataclass(frozen=True)
@@ -124,7 +132,7 @@ class GoogleSheetRegionalLocationSource:
         sheet_id: str = DEFAULT_SHEET_ID,
         gid: str = DEFAULT_SHEET_GID,
         *,
-        http_client: HttpClient = requests,
+        http_client: HttpClient = cast(HttpClient, requests),
         timeout: int = 30,
     ) -> None:
         self.sheet_id = sheet_id
@@ -163,6 +171,40 @@ class GoogleSheetRegionalLocationSource:
             temporary.write_text(response.text, encoding="utf-8")
             temporary.replace(destination)
         return catalog
+
+
+class RefreshingRegionalLocationProvider:
+    def __init__(
+        self,
+        source: GoogleSheetRegionalLocationSource,
+        cache_path: str | Path,
+        refresh_interval_seconds: float,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.source = source
+        self.cache_path = Path(cache_path)
+        self.refresh_interval_seconds = max(
+            1.0, float(refresh_interval_seconds)
+        )
+        self.clock = clock
+        self.catalog = source.load(self.cache_path)
+        self.next_refresh_at = self.clock() + self.refresh_interval_seconds
+        self.last_error: Exception | None = None
+
+    def refresh_if_due(self) -> bool:
+        now = self.clock()
+        if now < self.next_refresh_at:
+            return False
+        self.next_refresh_at = now + self.refresh_interval_seconds
+        try:
+            refreshed = self.source.load(self.cache_path)
+        except Exception as exc:
+            self.last_error = exc
+            return False
+        self.catalog = refreshed
+        self.last_error = None
+        return True
 
 
 def regional_initial_messages(
