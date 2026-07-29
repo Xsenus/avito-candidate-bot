@@ -27,6 +27,13 @@ from avito_bot.conversation import (
 )
 from avito_bot.candidate import normalize_phone, resolve_internship_date, split_full_name
 from avito_bot.storage import SQLiteStateStore
+from avito_bot.warehouse_sheet import (
+    DEFAULT_SHEET_GID as DEFAULT_WAREHOUSE_LOCATIONS_SHEET_GID,
+    DEFAULT_SHEET_ID as DEFAULT_WAREHOUSE_LOCATIONS_SHEET_ID,
+    GoogleSheetWarehouseSource,
+    RefreshingWarehouseProvider,
+)
+from avito_bot.warehouses import WAREHOUSE_GROUPS, replace_warehouse_groups
 from avito_bot.workflow import CandidateWorkflow, mark_invitation_sent
 from avito_bot.yandex_form import FormConfigurationError, YandexFormSubmitter
 
@@ -761,7 +768,44 @@ def main() -> None:
         )
     workflow = CandidateWorkflow.from_env(YandexFormSubmitter.from_env())
     interval = max(5, int(os.getenv("POLL_INTERVAL_SECONDS", "15")))
-    print(f"Starting poller with interval={interval}s state_db={state_path}")
+    warehouse_source = GoogleSheetWarehouseSource(
+        sheet_id=os.getenv(
+            "WAREHOUSE_LOCATIONS_SHEET_ID",
+            DEFAULT_WAREHOUSE_LOCATIONS_SHEET_ID,
+        ),
+        gid=os.getenv(
+            "WAREHOUSE_LOCATIONS_SHEET_GID",
+            DEFAULT_WAREHOUSE_LOCATIONS_SHEET_GID,
+        ),
+        timeout=max(
+            1,
+            int(os.getenv("WAREHOUSE_LOCATIONS_TIMEOUT_SECONDS", "30")),
+        ),
+    )
+    warehouse_cache_path = os.getenv(
+        "WAREHOUSE_LOCATIONS_CACHE_PATH",
+        str(Path(PROJECT_ROOT) / "data" / "warehouse_locations.csv"),
+    )
+    warehouse_refresh_seconds = max(
+        60,
+        int(os.getenv("WAREHOUSE_LOCATIONS_REFRESH_SECONDS", "300")),
+    )
+    try:
+        warehouse_provider = RefreshingWarehouseProvider(
+            warehouse_source,
+            warehouse_cache_path,
+            warehouse_refresh_seconds,
+            WAREHOUSE_GROUPS,
+        )
+    except Exception as exc:
+        print(f"Failed to load warehouse locations: {exc}")
+        return
+    replace_warehouse_groups(warehouse_provider.groups)
+    print(
+        f"Starting poller with interval={interval}s state_db={state_path} "
+        f"warehouse_locations_cache={warehouse_source.last_load_used_cache} "
+        f"warehouse_locations_refresh={warehouse_refresh_seconds}s"
+    )
 
     try:
         client.get_access_token()
@@ -832,6 +876,21 @@ def main() -> None:
     )
     next_health_log = time.monotonic() + health_interval
     while True:
+        if time.monotonic() >= warehouse_provider.next_refresh_at:
+            if warehouse_provider.refresh_if_due():
+                replace_warehouse_groups(warehouse_provider.groups)
+                if warehouse_source.last_load_used_cache:
+                    print(
+                        "WARNING: warehouse locations refresh used cached data; "
+                        "Google Sheet is temporarily unavailable"
+                    )
+                else:
+                    print("Warehouse locations refreshed from Google Sheet")
+            elif warehouse_provider.last_error is not None:
+                print(
+                    "WARNING: warehouse locations refresh failed; "
+                    f"keeping previous catalog: {warehouse_provider.last_error}"
+                )
         try:
             # A recruiter can open a chat before the next polling cycle. Avito
             # then removes it from the unread list even though the bot has not

@@ -97,6 +97,13 @@ WAREHOUSE_GROUPS = {
     "saint_petersburg": SAINT_PETERSBURG_WAREHOUSES,
 }
 
+
+def replace_warehouse_groups(
+    groups: dict[str, tuple[WarehouseOption, ...]],
+) -> None:
+    WAREHOUSE_GROUPS.clear()
+    WAREHOUSE_GROUPS.update(groups)
+
 MOSCOW_CITY_ALIASES = {
     "москва",
     "мск",
