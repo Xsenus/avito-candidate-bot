@@ -144,7 +144,8 @@ def test_saint_petersburg_region_starts_with_three_messages(city):
 
     assert len(messages) == 3
     assert "1. Троицкий" in messages[2]
-    assert "2. Запад" in messages[2]
+    assert "2. Бугры" in messages[2]
+    assert "2. Запад" not in messages[2]
 
 
 def test_unsupported_city_is_ignored():
@@ -170,6 +171,18 @@ def test_moscow_candidate_selects_warehouse_before_date():
     assert state.internship_time == "7:30:00"
     assert "каждый день в 7:30:00" in reply
     assert "день недели" in reply
+
+
+def test_saint_petersburg_candidate_selects_bugry_by_name():
+    state = ConversationState(step="awaiting_warehouse", city="Санкт-Петербург")
+
+    reply = handle_user_message(state, "Бугры?")
+
+    assert state.step == "awaiting_datetime"
+    assert state.warehouse_choice == 2
+    assert state.service_center == "Бугры"
+    assert state.internship_time == "7:00:00"
+    assert "каждый день в 7:00:00" in reply
 
 
 def test_selected_warehouse_uses_current_sheet_time(monkeypatch):

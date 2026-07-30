@@ -67,7 +67,9 @@ def test_catalog_overlays_addresses_and_times_without_changing_order():
     ]
     assert groups["moscow"][2].address == "Адрес 3"
     assert groups["moscow"][2].internship_time == "9:00:00"
+    assert groups["saint_petersburg"][1].label == "Бугры"
     assert groups["saint_petersburg"][1].service_center == "Бугры"
+    assert groups["saint_petersburg"][1].aliases == ("Запад",)
 
 
 def test_catalog_rejects_missing_required_warehouse():

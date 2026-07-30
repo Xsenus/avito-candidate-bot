@@ -833,7 +833,7 @@ def test_complete_candidate_journey_survives_state_reload(tmp_path, monkeypatch)
     assert form.applications[0].citizenship == "Российская Федерация"
     assert client.messages[0][1].startswith("1. 🚚 Водитель")
     assert client.messages[1][1].startswith("🛠 О работе")
-    assert "2. Запад" in client.messages[2][1]
+    assert "2. Бугры" in client.messages[2][1]
     assert client.messages[-1][1].startswith("Приглашение на 23.07., Бугры")
     assert client.messages[-1][1].endswith("До встречи!")
     assert all(store.is_processed("chat-journey", f"message-{i}") for i in range(1, 6))

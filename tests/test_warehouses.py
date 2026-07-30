@@ -55,7 +55,8 @@ def test_saint_petersburg_region_uses_two_warehouses(city):
     assert warehouse_group_for_city(city) == "saint_petersburg"
     prompt = warehouse_prompt_for_city(city)
     assert "1. Троицкий" in prompt
-    assert "2. Запад" in prompt
+    assert "2. Бугры" in prompt
+    assert "2. Запад" not in prompt
     assert "🕥 Стажировка в 7:30:00" in prompt
     assert "🕥 Стажировка в 7:00:00" in prompt
     assert "Напишите номер подходящего склада (1–2)" in prompt
@@ -95,3 +96,19 @@ def test_warehouse_choice_accepts_number_and_name():
     assert parse_warehouse_choice("2", "Бугры").service_center == "Бугры"
     assert parse_warehouse_choice("0", "Москва") == 0
     assert parse_warehouse_choice("99", "Москва") is None
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["Бугры", "Бугры?", "склад Бугры", "Запад", "Запад?"],
+)
+def test_saint_petersburg_bugry_accepts_current_and_legacy_names(answer):
+    choice = parse_warehouse_choice(answer, "Санкт-Петербург")
+
+    assert choice.number == 2
+    assert choice.label == "Бугры"
+    assert choice.service_center == "Бугры"
+
+
+def test_warehouse_choice_does_not_match_part_of_another_word():
+    assert parse_warehouse_choice("Западный район", "Санкт-Петербург") is None

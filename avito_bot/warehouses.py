@@ -11,6 +11,7 @@ class WarehouseOption:
     service_center: str
     address: str
     internship_time: str
+    aliases: tuple[str, ...] = ()
 
 
 MOSCOW_WAREHOUSES = (
@@ -84,11 +85,12 @@ SAINT_PETERSBURG_WAREHOUSES = (
     ),
     WarehouseOption(
         2,
-        "Запад",
+        "Бугры",
         "Бугры",
         "Бугровское сельское поселение, деревня Порошкино, "
         "23 км КАД (внутреннее кольцо) ул., стр. 3",
         "7:00:00",
+        ("Запад",),
     ),
 )
 
@@ -197,6 +199,11 @@ def parse_warehouse_choice(
             return 0
         return next((option for option in options if option.number == number), None)
     for option in options:
-        if normalize_location(option.label) in normalized:
+        aliases = {
+            normalize_location(value)
+            for value in (option.label, option.service_center, *option.aliases)
+            if normalize_location(value)
+        }
+        if _contains_location_alias(normalized, aliases):
             return option
     return None
