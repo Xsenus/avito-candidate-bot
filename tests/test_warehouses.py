@@ -9,7 +9,26 @@ from avito_bot.warehouses import (
 
 @pytest.mark.parametrize(
     "city",
-    ["Москва", "г. Москва", "МСК", "Мытищи", "Дзержинский", "Подольск"],
+    [
+        "Москва",
+        "г. Москва",
+        "МСК",
+        "Мытищи",
+        "Дзержинский",
+        "Подольск",
+        "Балашиха",
+        "Красногорск",
+        "Видное",
+        "Домодедово",
+        "Люберцы",
+        "Королёв",
+        "Королев",
+        "Лыткарино",
+        "Железнодорожный",
+        "Пушкино",
+        "Московская область, городской округ Красногорск",
+        "Балашиха, микрорайон Железнодорожный",
+    ],
 )
 def test_moscow_region_cities_use_eight_warehouses(city):
     assert warehouse_group_for_city(city) == "moscow"
@@ -60,6 +79,14 @@ def test_troitsky_address_matches_customer_text_exactly():
 def test_other_city_does_not_get_a_warehouse_prompt(city):
     assert warehouse_group_for_city(city) is None
     assert warehouse_prompt_for_city(city) is None
+
+
+@pytest.mark.parametrize(
+    "city",
+    ["Королевский район", "Пушкин", "Люберецкий район", "Балашов"],
+)
+def test_similar_location_names_do_not_match_moscow_region_aliases(city):
+    assert warehouse_group_for_city(city) is None
 
 
 def test_warehouse_choice_accepts_number_and_name():

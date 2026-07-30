@@ -105,11 +105,20 @@ def replace_warehouse_groups(
     WAREHOUSE_GROUPS.update(groups)
 
 MOSCOW_CITY_ALIASES = {
+    "балашиха",
+    "видное",
+    "домодедово",
+    "железнодорожный",
+    "королев",
+    "красногорск",
+    "лыткарино",
+    "люберцы",
     "москва",
     "мск",
     "мытищи",
     "дзержинский",
     "подольск",
+    "пушкино",
 }
 
 SAINT_PETERSBURG_CITY_ALIASES = {

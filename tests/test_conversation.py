@@ -107,7 +107,25 @@ def test_negative_answers_are_not_mistaken_for_positive(answer):
     assert not is_positive(answer)
 
 
-@pytest.mark.parametrize("city", ["Москва", "Мытищи", "Подольск", "Дзержинский"])
+@pytest.mark.parametrize(
+    "city",
+    [
+        "Москва",
+        "Мытищи",
+        "Подольск",
+        "Дзержинский",
+        "Балашиха",
+        "Красногорск",
+        "Видное",
+        "Домодедово",
+        "Люберцы",
+        "Королёв",
+        "Королев",
+        "Лыткарино",
+        "Железнодорожный",
+        "Пушкино",
+    ],
+)
 def test_moscow_region_starts_with_three_messages(city):
     messages = initial_messages_for_city(city)
 
