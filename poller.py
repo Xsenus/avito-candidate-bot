@@ -297,6 +297,7 @@ def complete_pending_application(
     store: SQLiteStateStore,
     chat_id: str,
     state: ConversationState,
+    regional_locations: RegionalLocationCatalog | None = None,
 ) -> bool:
     missing = missing_application_fields(state)
     if missing and state.application_status != "submitted":
@@ -312,6 +313,19 @@ def complete_pending_application(
             "Спасибо, данные получили. Завершаю запись — это может занять до минуты.",
         )
         state.processing_notice_sent = True
+        store.save(chat_id, state)
+
+    if (
+        regional_locations is not None
+        and state.warehouse_selection_source == "regional_catalog"
+        and state.service_center
+    ):
+        current_location = regional_locations.resolve(
+            state.service_center,
+            None,
+        )
+        state.address = current_location.address
+        state.internship_time = current_location.internship_time
         store.save(chat_id, state)
 
     try:
@@ -673,7 +687,14 @@ def process_chat_message(
     store.mark_message_seen(chat_id, message_id, normalized_created(message))
 
     if state.application_status in {"pending", "submitted"}:
-        complete_pending_application(client, workflow, store, chat_id, state)
+        complete_pending_application(
+            client,
+            workflow,
+            store,
+            chat_id,
+            state,
+            regional_locations,
+        )
     print(
         f"message processed chat_id={chat_id} message_id={message_id} "
         f"reply_sent={bool(reply)} step={state.step} "
@@ -908,7 +929,14 @@ def main() -> None:
                     print(f"message error chat_id={values[0]}: {exc}")
 
             for chat_id, state in store.pending():
-                complete_pending_application(client, workflow, store, chat_id, state)
+                complete_pending_application(
+                    client,
+                    workflow,
+                    store,
+                    chat_id,
+                    state,
+                    regional_locations,
+                )
             consecutive_poll_errors = 0
         except Exception as exc:
             consecutive_poll_errors += 1

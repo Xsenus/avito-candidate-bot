@@ -75,25 +75,31 @@ def test_questions_line_can_be_enabled(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("service_center", "source_time"),
+    ("service_center", "source_time", "current_time"),
     [
-        ("Ростов", "9:00"),
-        ("СЦ Ростов-на-Дону", "11:15:00"),
-        ("Краснодар", "08:45"),
-        ("Нижний Новгород", "12:00:00"),
+        ("Ростов", "10:30", "9:00:00"),
+        ("Краснодар", "10:30", "9:00:00"),
+        ("Нижний Новгород", "10:30", "8:00:00"),
+        ("Калуга", "7:00:00", "8:00:00"),
     ],
 )
-def test_selected_cities_always_use_1030(service_center, source_time):
+def test_regional_invitation_uses_current_location_time(
+    service_center,
+    source_time,
+    current_time,
+):
     catalog = InvitationCatalog.from_csv(
         '"СЦ","Текст сообщения"\n'
         f'"{service_center}","Стажировка начинается в {source_time} '
         'по адресу склада ДАТА"\n'
     )
 
-    invitation = catalog.find(service_center).render("28.07.2026")
+    invitation = catalog.find(service_center).render(
+        "28.07.2026",
+        internship_time=current_time,
+    )
 
-    assert "Стажировка начинается в 10:30 по адресу" in invitation
-    assert "10:30:00" not in invitation
+    assert f"Стажировка начинается в {current_time} по адресу" in invitation
 
 
 def test_other_cities_keep_time_from_sheet():
@@ -107,11 +113,29 @@ def test_other_cities_keep_time_from_sheet():
     assert "Стажировка начинается в 11:15:00 по адресу" in invitation
 
 
-def test_selected_city_requires_start_time_in_template():
+def test_explicit_location_time_requires_time_in_template():
+    catalog = InvitationCatalog.from_csv(
+        '"СЦ","Текст сообщения"\n'
+        '"Ростов","Приходите на стажировку ДАТА"\n'
+    )
+
     with pytest.raises(ValueError, match="не найдено время начала стажировки"):
-        InvitationCatalog.from_csv(
-            '"СЦ","Текст сообщения"\n'
-            '"Ростов","Приходите на стажировку ДАТА"\n'
+        catalog.find("Ростов").render(
+            "28.07.2026",
+            internship_time="9:00:00",
+        )
+
+
+def test_explicit_location_time_requires_hh_mm_ss_format():
+    catalog = InvitationCatalog.from_csv(
+        '"СЦ","Текст сообщения"\n'
+        '"Ростов","Стажировка начинается в 10:30 по адресу ДАТА"\n'
+    )
+
+    with pytest.raises(ValueError, match="Некорректное время"):
+        catalog.find("Ростов").render(
+            "28.07.2026",
+            internship_time="9:00",
         )
 
 

@@ -112,6 +112,20 @@ def test_rostov_uses_different_form_and_invitation_names():
     assert invitation.startswith("Приглашение Ростов 23.07.")
 
 
+def test_regional_workflow_uses_selected_location_time_in_invitation():
+    form = FakeForm()
+    workflow = CandidateWorkflow(form, RostovInvitationSource())
+    state = ready_state()
+    state.city = "Ростов-на-Дону"
+    state.service_center = "Ростов"
+    state.warehouse_selection_source = "regional_catalog"
+    state.internship_time = "9:00:00"
+
+    invitation = workflow.complete(state)
+
+    assert "Стажировка начинается в 9:00:00" in invitation
+
+
 class SelectedWarehouseInvitationSource:
     def load(self):
         return InvitationCatalog.from_csv(

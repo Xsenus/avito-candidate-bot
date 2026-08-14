@@ -6,6 +6,7 @@ from avito_bot.regional_locations import RegionalLocationCatalog
 from avito_bot.storage import SQLiteStateStore
 from avito_bot.workflow import CandidateWorkflow
 from poller import (
+    complete_pending_application,
     extract_chat_context,
     infer_step_from_bot_message,
     initialize_message_cursor,
@@ -564,7 +565,17 @@ class FakeInvitationSource:
     def load(self):
         return InvitationCatalog.from_csv(
             '"СЦ","Текст сообщения"\n'
-            '"Кемерово","Приглашение на ДАТА, Кемерово"\n'
+            '"Кемерово","Приглашение на ДАТА, Кемерово. '
+            'Стажировка начинается в 8:00:00"\n'
+        )
+
+
+class RegionalInvitationSource:
+    def load(self):
+        return InvitationCatalog.from_csv(
+            '"СЦ","Текст сообщения"\n'
+            '"Краснодар","Стажировка начинается в 10:30:00 '
+            'по адресу склада ДАТА"\n'
         )
 
 
@@ -746,9 +757,57 @@ def test_regional_journey_uses_catalog_center_in_form(
     assert restored.internship_time == "8:00:00"
     assert form.applications[0].warehouse == "СЦ Кемерово"
     assert form.applications[0].internship_date == "30.07.2026"
-    assert client.messages[-1][1].startswith(
-        "Приглашение на 30.07., Кемерово"
+    assert client.messages[-1][1].startswith("Приглашение на 30.07., Кемерово")
+    assert "Стажировка начинается в 8:00:00" in client.messages[-1][1]
+    store.close()
+
+
+def test_regional_completion_refreshes_time_from_current_location_catalog(
+    tmp_path,
+):
+    store = SQLiteStateStore(tmp_path / "regional-current-time.sqlite3")
+    state = ConversationState(
+        step="awaiting_phone",
+        city="Краснодар",
+        service_center="Краснодар",
+        item_id="regional-item",
+        address="старый адрес",
+        internship_time="10:30:00",
+        warehouse_selection_source="regional_catalog",
+        last_name="Иванов",
+        first_name="Иван",
+        full_name="Иванов Иван",
+        phone="+79991234567",
+        internship_date="30.07.2026",
+        application_status="pending",
     )
+    store.save("chat-regional-current-time", state)
+    client = FakeClient()
+    form = FakeForm()
+    workflow = CandidateWorkflow(form, RegionalInvitationSource())
+    current_locations = RegionalLocationCatalog.from_csv(
+        " ,СЦ,Куда приглашать на стажировку,Время стажировки\n"
+        'Краснодар,Краснодар,"актуальный адрес",9:00:00\n'
+    )
+
+    completed = complete_pending_application(
+        client,
+        workflow,
+        store,
+        "chat-regional-current-time",
+        state,
+        current_locations,
+    )
+
+    restored = store.load("chat-regional-current-time")
+    assert completed
+    assert restored.address == "актуальный адрес"
+    assert restored.internship_time == "9:00:00"
+    assert len(form.applications) == 1
+    assert client.messages[-1][1].startswith(
+        "Стажировка начинается в 9:00:00"
+    )
+    assert "10:30" not in client.messages[-1][1]
     store.close()
 
 

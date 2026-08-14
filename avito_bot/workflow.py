@@ -113,7 +113,15 @@ class CandidateWorkflow:
             state.application_status = "submitted"
             persist(state)
 
-        return catalog.find(selection.name).render(state.internship_date or "")
+        internship_time = (
+            state.internship_time
+            if state.warehouse_selection_source == "regional_catalog"
+            else None
+        )
+        return catalog.find(selection.name).render(
+            state.internship_date or "",
+            internship_time=internship_time,
+        )
 
 
 def mark_invitation_sent(state: ConversationState) -> None:
