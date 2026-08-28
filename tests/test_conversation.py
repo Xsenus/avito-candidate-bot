@@ -2,8 +2,11 @@ import pytest
 
 from avito_bot.conversation import (
     ADDRESS_FALLBACK,
+    FOLLOW_UP_MESSAGE,
+    INITIAL_MESSAGE,
     ConversationState,
     handle_user_message,
+    initial_messages_for_city,
     is_positive,
     looks_like_datetime,
     resolve_address,
@@ -104,28 +107,67 @@ def test_negative_answers_are_not_mistaken_for_positive(answer):
     assert not is_positive(answer)
 
 
-def test_weekday_sent_with_internship_consent_is_not_asked_twice(monkeypatch):
-    state = ConversationState(step="awaiting_staj")
-    monkeypatch.setattr(
-        "avito_bot.conversation.resolve_internship_date",
-        lambda value: __import__("datetime").date(2026, 7, 23),
-    )
+@pytest.mark.parametrize(
+    "city",
+    [
+        "Москва",
+        "Мытищи",
+        "Подольск",
+        "Дзержинский",
+        "Балашиха",
+        "Красногорск",
+        "Видное",
+        "Домодедово",
+        "Люберцы",
+        "Королёв",
+        "Королев",
+        "Лыткарино",
+        "Железнодорожный",
+        "Пушкино",
+    ],
+)
+def test_moscow_region_starts_with_three_messages(city):
+    messages = initial_messages_for_city(city)
 
-    reply = handle_user_message(state, "Да, в четверг")
+    assert len(messages) == 3
+    assert messages[0] == INITIAL_MESSAGE
+    assert messages[1] == FOLLOW_UP_MESSAGE
+    assert messages[2].startswith("Подобрали для вас склады")
+    assert "1. Железнодорожный" in messages[2]
+    assert "Готовы пройти стажировку?" not in "\n".join(messages)
+    assert all(len(message) <= 1000 for message in messages)
 
-    assert reply
-    assert state.step == "awaiting_full_name"
-    assert state.internship_date == "23.07.2026"
+
+def test_moscow_and_saint_petersburg_price_is_per_shift():
+    for city in ("Москва", "Санкт-Петербург"):
+        messages = initial_messages_for_city(city)
+        assert "от 6 000 ₽ за смену" in messages[0]
+        assert "за рейс" not in messages[0]
+
+
+@pytest.mark.parametrize("city", ["Санкт-Петербург", "СПб", "Бугры"])
+def test_saint_petersburg_region_starts_with_three_messages(city):
+    messages = initial_messages_for_city(city)
+
+    assert len(messages) == 3
+    assert "1. Троицкий" in messages[2]
+    assert "2. Бугры" in messages[2]
+    assert "2. Запад" not in messages[2]
+
+
+def test_unsupported_city_is_ignored():
+    state = ConversationState()
+
+    reply = handle_user_message(state, "Отклик", city_hint="Кемерово")
+
+    assert reply == ""
+    assert state.step == "unsupported"
+    assert initial_messages_for_city("Кемерово") == ()
+    assert handle_user_message(state, "Где склад?") == ""
 
 
 def test_moscow_candidate_selects_warehouse_before_date():
-    state = ConversationState(step="awaiting_staj", city="Москва")
-
-    prompt = handle_user_message(state, "Да", city_hint="Москва")
-
-    assert state.step == "awaiting_warehouse"
-    assert "1. Железнодорожный" in prompt
-    assert "8. СЦ Тарный" in prompt
+    state = ConversationState(step="awaiting_warehouse", city="Москва")
 
     reply = handle_user_message(state, "4", city_hint="Москва")
 
@@ -133,7 +175,93 @@ def test_moscow_candidate_selects_warehouse_before_date():
     assert state.warehouse_choice == 4
     assert state.service_center == "Печатники"
     assert state.address == "Курьяновская набережная, 6с2"
+    assert state.internship_time == "7:30:00"
+    assert "каждый день в 7:30:00" in reply
     assert "день недели" in reply
+
+
+def test_saint_petersburg_candidate_selects_bugry_by_name():
+    state = ConversationState(step="awaiting_warehouse", city="Санкт-Петербург")
+
+    reply = handle_user_message(state, "Бугры?")
+
+    assert state.step == "awaiting_datetime"
+    assert state.warehouse_choice == 2
+    assert state.service_center == "Бугры"
+    assert state.internship_time == "7:00:00"
+    assert "каждый день в 7:00:00" in reply
+
+
+def test_selected_warehouse_uses_current_sheet_time(monkeypatch):
+    from avito_bot.warehouses import WarehouseOption
+
+    monkeypatch.setattr(
+        "avito_bot.conversation.parse_warehouse_choice",
+        lambda text, city: WarehouseOption(
+            3,
+            "Кувекино",
+            "Кувекино",
+            "Актуальный адрес",
+            "9:15:00",
+        ),
+    )
+    state = ConversationState(step="awaiting_warehouse", city="Москва")
+
+    reply = handle_user_message(state, "3")
+
+    assert state.internship_time == "9:15:00"
+    assert reply.startswith("Стажировка каждый день в 9:15:00,")
+
+
+def test_legacy_selected_state_recovers_warehouse_time():
+    state = ConversationState(
+        step="awaiting_arrival",
+        city="Москва",
+        warehouse_choice=6,
+        service_center="Строгино",
+    )
+
+    reply = handle_user_message(state, "Да")
+
+    assert state.step == "awaiting_datetime"
+    assert state.internship_time == "8:30:00"
+    assert reply.startswith("Стажировка каждый день в 8:30:00,")
+
+
+def test_legacy_state_without_warehouse_asks_for_selection():
+    state = ConversationState(step="awaiting_arrival", city="Санкт-Петербург")
+
+    reply = handle_user_message(state, "Да")
+
+    assert state.step == "awaiting_warehouse"
+    assert "Чтобы указать точное время стажировки" in reply
+    assert "1. Троицкий" in reply
+
+
+def test_address_question_before_warehouse_choice_repeats_listing_options():
+    state = ConversationState(step="awaiting_warehouse", city="Москва")
+
+    reply = handle_user_message(state, "А где находится склад?")
+
+    assert state.step == "awaiting_warehouse"
+    assert state.address is None
+    assert "Адрес зависит от выбранного склада" in reply
+    assert "1. Железнодорожный" in reply
+    assert "6. Строгино" in reply
+    assert "7. Дзержинский" not in reply
+    assert "8. СЦ Тарный" not in reply
+    assert "Дмитровское шоссе 157с1" not in reply
+    assert len(reply) <= 1000
+
+
+def test_address_question_after_warehouse_choice_returns_selected_address():
+    state = ConversationState(step="awaiting_warehouse", city="Москва")
+    handle_user_message(state, "4")
+
+    reply = handle_user_message(state, "А где находится склад?")
+
+    assert state.step == "awaiting_datetime"
+    assert reply == "Адрес склада: Курьяновская набережная, 6с2"
 
 
 def test_invalid_warehouse_choice_does_not_advance():
@@ -154,13 +282,3 @@ def test_zero_cancels_application_and_makes_it_terminal():
     assert state.step == "done"
     assert state.application_status == "cancelled"
     assert "отменил" in reply
-
-
-@pytest.mark.parametrize("city", ["Кемерово", "Томск", "Омск"])
-def test_non_regional_city_keeps_existing_date_flow(city):
-    state = ConversationState(step="awaiting_staj", city=city)
-
-    reply = handle_user_message(state, "Да", city_hint=city)
-
-    assert state.step == "awaiting_datetime"
-    assert "день недели" in reply

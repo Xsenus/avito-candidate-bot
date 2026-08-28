@@ -54,6 +54,16 @@ class SQLiteStateStore:
             )
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_outgoing_messages (
+                chat_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, message_id)
+            )
+            """
+        )
         self._connection.commit()
 
     def load(self, chat_id: str) -> ConversationState:
@@ -88,7 +98,30 @@ class SQLiteStateStore:
                 "SELECT 1 FROM processed_messages WHERE chat_id = ? AND message_id = ?",
                 (chat_id, message_id),
             ).fetchone()
-        return row is not None
+            return row is not None
+
+    def mark_bot_outgoing(self, chat_id: str, message_id: str) -> None:
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO bot_outgoing_messages(chat_id, message_id)
+                VALUES (?, ?)
+                """,
+                (chat_id, message_id),
+            )
+            self._connection.commit()
+
+    def is_bot_outgoing(self, chat_id: str, message_id: str) -> bool:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT 1
+                FROM bot_outgoing_messages
+                WHERE chat_id = ? AND message_id = ?
+                """,
+                (chat_id, message_id),
+            ).fetchone()
+            return row is not None
 
     def has_seen_chat(self, chat_id: str) -> bool:
         """Return whether state or a message cursor already exists for this chat."""

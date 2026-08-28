@@ -86,7 +86,7 @@ def test_regional_messages_match_requested_conditions():
 
     assert len(messages) == 4
     assert messages[0].startswith("1. 🚚 Водитель")
-    assert "от 4 400 ₽ за рейс" in messages[0]
+    assert "от 4 400 ₽ за смену" in messages[0]
     assert "Доход до 160 000 ₽ в месяц" in messages[0]
     assert messages[1].startswith("🛠 О работе")
     assert "📍 Адрес: г. Белгород, ул Мичурина 104А" in messages[2]

@@ -16,15 +16,12 @@ if PROJECT_ROOT not in sys.path:
 from avito_bot.avito_client import AvitoClient
 from avito_bot.alerts import emit_alert
 from avito_bot.conversation import (
-    ADDRESS_MESSAGE,
     CONFIRMATION_MESSAGE,
     FOLLOW_UP_MESSAGE,
     INITIAL_MESSAGE,
-    INTERNSHIP_MESSAGE,
-    STORE_SELECTION_MESSAGE,
     ConversationState,
     handle_user_message,
-    schedule_delayed_message,
+    initial_messages_for_city,
 )
 from avito_bot.candidate import normalize_phone, resolve_internship_date, split_full_name
 from avito_bot.regional_locations import (
@@ -37,7 +34,17 @@ from avito_bot.regional_locations import (
 )
 from avito_bot.service_centers import parse_service_center_overrides
 from avito_bot.storage import SQLiteStateStore
-from avito_bot.warehouses import warehouse_group_for_city
+from avito_bot.warehouse_sheet import (
+    DEFAULT_SHEET_GID as DEFAULT_WAREHOUSE_LOCATIONS_SHEET_GID,
+    DEFAULT_SHEET_ID as DEFAULT_WAREHOUSE_LOCATIONS_SHEET_ID,
+    GoogleSheetWarehouseSource,
+    RefreshingWarehouseProvider,
+)
+from avito_bot.warehouses import (
+    WAREHOUSE_GROUPS,
+    replace_warehouse_groups,
+    warehouse_group_for_city,
+)
 from avito_bot.workflow import CandidateWorkflow, mark_invitation_sent
 from avito_bot.yandex_form import FormConfigurationError, YandexFormSubmitter
 
@@ -64,6 +71,7 @@ def iter_new_chat_messages(
     store: SQLiteStateStore,
     *,
     not_before_timestamp: float | None = None,
+    manual_takeover_after: float | None = None,
 ) -> Iterator[tuple[str, ConversationState, dict[str, Any], str, str | None, str | None]]:
     for chat in chats:
         chat_id = str(chat.get("id") or "").strip()
@@ -148,7 +156,10 @@ def iter_new_chat_messages(
             else:
                 only_last_message = True
 
-        terminal = state.application_status == "completed" or state.step == "done"
+        terminal = state.application_status in {"completed", "manual"} or state.step in {
+            "done",
+            "manual_takeover",
+        }
         for message in messages:
             message_id = str(message.get("id") or "").strip()
             if not message_id or store.is_processed(chat_id, message_id):
@@ -171,6 +182,25 @@ def iter_new_chat_messages(
                 store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
             if message.get("direction") != "in":
+                created = normalized_created(message)
+                if (
+                    manual_takeover_after is not None
+                    and message.get("type") == "text"
+                    and created is not None
+                    and created >= manual_takeover_after
+                    and not store.is_bot_outgoing(chat_id, message_id)
+                ):
+                    state.step = "manual_takeover"
+                    state.application_status = "manual"
+                    state.last_error = None
+                    state.manual_takeover_at = datetime.now(timezone.utc).isoformat()
+                    state.manual_takeover_message_id = message_id
+                    store.save(chat_id, state)
+                    terminal = True
+                    print(
+                        f"manual takeover chat_id={chat_id} "
+                        f"message_id={message_id}; bot paused"
+                    )
                 store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
 
@@ -270,6 +300,33 @@ def message_key(message: dict[str, Any]) -> tuple[float, str] | None:
     return (created, message_id) if created is not None and message_id else None
 
 
+def sent_message_id(response: Any) -> str | None:
+    if not isinstance(response, dict):
+        return None
+    direct = str(response.get("id") or "").strip()
+    if direct:
+        return direct
+    nested = response.get("message")
+    if isinstance(nested, dict):
+        nested_id = str(nested.get("id") or "").strip()
+        if nested_id:
+            return nested_id
+    return None
+
+
+def send_bot_message(
+    client: AvitoClient,
+    store: SQLiteStateStore,
+    chat_id: str,
+    text: str,
+) -> dict[str, Any] | None:
+    response = client.send_message(chat_id, text)
+    message_id = sent_message_id(response)
+    if message_id:
+        store.mark_bot_outgoing(chat_id, message_id)
+    return response
+
+
 def oldest_first(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Avito returns newest first; use timestamps when available for stable ordering."""
     if messages and all(isinstance(message.get("created"), (int, float)) for message in messages):
@@ -308,7 +365,9 @@ def complete_pending_application(
         return False
 
     if not state.processing_notice_sent:
-        client.send_message(
+        send_bot_message(
+            client,
+            store,
             chat_id,
             "Спасибо, данные получили. Завершаю запись — это может занять до минуты.",
         )
@@ -341,7 +400,7 @@ def complete_pending_application(
         return False
 
     try:
-        client.send_message(chat_id, invitation)
+        send_bot_message(client, store, chat_id, invitation)
     except Exception as exc:
         schedule_retry(store, chat_id, state, exc)
         print(f"invitation error chat_id={chat_id}: {exc}")
@@ -477,10 +536,13 @@ def initialize_message_cursor(
 def infer_step_from_bot_message(text: str | None) -> str | None:
     normalized = (text or "").strip()
     if normalized in {INITIAL_MESSAGE.strip(), FOLLOW_UP_MESSAGE.strip()}:
-        return "awaiting_interest"
-    if normalized == INTERNSHIP_MESSAGE.strip():
-        return "awaiting_staj"
-    if normalized in {ADDRESS_MESSAGE.strip(), STORE_SELECTION_MESSAGE.strip()}:
+        return "sending_intro"
+    if normalized.startswith("Подобрали для вас склады"):
+        return "awaiting_warehouse"
+    if (
+        normalized.startswith("Стажировка каждый день в ")
+        and "на какой день вас записать?" in normalized
+    ):
         return "awaiting_datetime"
     if normalized == CONFIRMATION_MESSAGE.strip():
         return "awaiting_full_name"
@@ -632,6 +694,37 @@ def restore_collected_fields(
                 pass
 
 
+def send_initial_sequence(
+    client: AvitoClient,
+    store: SQLiteStateStore,
+    chat_id: str,
+    state: ConversationState,
+    message_id: str,
+) -> bool:
+    messages = initial_messages_for_city(state.city)
+    if not messages:
+        state.step = "unsupported"
+        state.intro_messages_sent = 0
+        state.intro_trigger_message_id = None
+        store.save(chat_id, state)
+        return False
+
+    if state.step == "idle":
+        state.step = "sending_intro"
+        state.intro_messages_sent = 0
+        state.intro_trigger_message_id = message_id
+        store.save(chat_id, state)
+
+    for outgoing_text in messages[state.intro_messages_sent :]:
+        send_bot_message(client, store, chat_id, outgoing_text)
+        state.intro_messages_sent += 1
+        store.save(chat_id, state)
+
+    state.step = "awaiting_warehouse"
+    store.save(chat_id, state)
+    return True
+
+
 def process_chat_message(
     client: AvitoClient,
     workflow: CandidateWorkflow,
@@ -654,7 +747,6 @@ def process_chat_message(
     if (
         regional_locations is not None
         and state.step in {"idle", "sending_regional_intro"}
-        and is_job_application_system_message(message)
         and warehouse_group_for_city(state.city) is None
     ):
         send_regional_initial_sequence(
@@ -666,9 +758,7 @@ def process_chat_message(
             regional_locations,
             regional_overrides,
         )
-        store.mark_message_seen(
-            chat_id, message_id, normalized_created(message)
-        )
+        store.mark_message_seen(chat_id, message_id, normalized_created(message))
         print(
             f"regional application started chat_id={chat_id} "
             f"message_id={message_id} city={state.city!r} "
@@ -676,12 +766,38 @@ def process_chat_message(
         )
         return
 
+    if (
+        state.step in {"idle", "sending_intro"}
+        and warehouse_group_for_city(state.city) is not None
+    ):
+        reply_sent = send_initial_sequence(
+            client,
+            store,
+            chat_id,
+            state,
+            message_id,
+        )
+        store.mark_message_seen(chat_id, message_id, normalized_created(message))
+        state.intro_trigger_message_id = None
+        store.save(chat_id, state)
+        print(
+            f"message processed chat_id={chat_id} message_id={message_id} "
+            f"reply_sent={reply_sent} step={state.step} "
+            f"application_status={state.application_status}"
+        )
+        return
+
+    if (
+        state.step == "awaiting_warehouse"
+        and state.intro_trigger_message_id == message_id
+    ):
+        store.mark_message_seen(chat_id, message_id, normalized_created(message))
+        state.intro_trigger_message_id = None
+        store.save(chat_id, state)
+        return
     reply = handle_user_message(state, text, city_hint=state.city)
     if reply:
-        client.send_message(chat_id, reply)
-        if reply == INITIAL_MESSAGE:
-            delay = int(os.getenv("FOLLOW_UP_DELAY_SECONDS", "5"))
-            schedule_delayed_message(client, chat_id, FOLLOW_UP_MESSAGE, delay=delay)
+        send_bot_message(client, store, chat_id, reply)
 
     store.save(chat_id, state)
     store.mark_message_seen(chat_id, message_id, normalized_created(message))
@@ -725,7 +841,7 @@ def send_regional_initial_sequence(
 
     messages = regional_initial_messages(location)
     for outgoing_text in messages[state.regional_intro_messages_sent :]:
-        client.send_message(chat_id, outgoing_text)
+        send_bot_message(client, store, chat_id, outgoing_text)
         state.regional_intro_messages_sent += 1
         store.save(chat_id, state)
 
@@ -752,6 +868,27 @@ def main() -> None:
     )
     state_path = os.getenv("STATE_DB_PATH", str(Path(PROJECT_ROOT) / "data" / "bot.sqlite3"))
     store = SQLiteStateStore(state_path)
+    manual_takeover_after = None
+    if os.getenv("PAUSE_ON_MANUAL_OUTGOING", "false").strip().lower() == "true":
+        manual_takeover_key = "manual_takeover_started_at_v1"
+        configured_boundary = store.get_metadata(manual_takeover_key)
+        if configured_boundary is None:
+            manual_takeover_after = datetime.now(timezone.utc).timestamp()
+            store.set_metadata(manual_takeover_key, str(manual_takeover_after))
+            print(
+                "Manual takeover baseline initialized; "
+                "pre-existing outgoing messages were skipped"
+            )
+        else:
+            try:
+                manual_takeover_after = float(configured_boundary)
+            except ValueError:
+                manual_takeover_after = datetime.now(timezone.utc).timestamp()
+                store.set_metadata(
+                    manual_takeover_key,
+                    str(manual_takeover_after),
+                )
+        print("Manual takeover detection enabled")
     interrupted = store.quarantine_interrupted_submissions()
     if interrupted:
         print(
@@ -795,11 +932,46 @@ def main() -> None:
         os.getenv("SERVICE_CENTER_OVERRIDES_JSON", "")
     )
     interval = max(5, int(os.getenv("POLL_INTERVAL_SECONDS", "15")))
+    warehouse_source = GoogleSheetWarehouseSource(
+        sheet_id=os.getenv(
+            "WAREHOUSE_LOCATIONS_SHEET_ID",
+            DEFAULT_WAREHOUSE_LOCATIONS_SHEET_ID,
+        ),
+        gid=os.getenv(
+            "WAREHOUSE_LOCATIONS_SHEET_GID",
+            DEFAULT_WAREHOUSE_LOCATIONS_SHEET_GID,
+        ),
+        timeout=max(
+            1,
+            int(os.getenv("WAREHOUSE_LOCATIONS_TIMEOUT_SECONDS", "30")),
+        ),
+    )
+    warehouse_cache_path = os.getenv(
+        "WAREHOUSE_LOCATIONS_CACHE_PATH",
+        str(Path(PROJECT_ROOT) / "data" / "warehouse_locations.csv"),
+    )
+    warehouse_refresh_seconds = max(
+        60,
+        int(os.getenv("WAREHOUSE_LOCATIONS_REFRESH_SECONDS", "300")),
+    )
+    try:
+        warehouse_provider = RefreshingWarehouseProvider(
+            warehouse_source,
+            warehouse_cache_path,
+            warehouse_refresh_seconds,
+            WAREHOUSE_GROUPS,
+        )
+    except Exception as exc:
+        print(f"Failed to load warehouse locations: {exc}")
+        return
+    replace_warehouse_groups(warehouse_provider.groups)
     print(
         f"Starting poller with interval={interval}s state_db={state_path} "
         f"regional_locations={len(regional_locations)} "
         f"regional_locations_cache={regional_source.last_load_used_cache} "
-        f"regional_locations_refresh={regional_refresh_seconds}s"
+        f"regional_locations_refresh={regional_refresh_seconds}s "
+        f"warehouse_locations_cache={warehouse_source.last_load_used_cache} "
+        f"warehouse_locations_refresh={warehouse_refresh_seconds}s"
     )
 
     try:
@@ -897,6 +1069,21 @@ def main() -> None:
                     "WARNING: regional locations refresh failed; "
                     f"keeping previous catalog: {regional_provider.last_error}"
                 )
+        if time.monotonic() >= warehouse_provider.next_refresh_at:
+            if warehouse_provider.refresh_if_due():
+                replace_warehouse_groups(warehouse_provider.groups)
+                if warehouse_source.last_load_used_cache:
+                    print(
+                        "WARNING: warehouse locations refresh used cached data; "
+                        "Google Sheet is temporarily unavailable"
+                    )
+                else:
+                    print("Warehouse locations refreshed from Google Sheet")
+            elif warehouse_provider.last_error is not None:
+                print(
+                    "WARNING: warehouse locations refresh failed; "
+                    f"keeping previous catalog: {warehouse_provider.last_error}"
+                )
         try:
             # A recruiter can open a chat before the next polling cycle. Avito
             # then removes it from the unread list even though the bot has not
@@ -911,6 +1098,7 @@ def main() -> None:
                 chats,
                 store,
                 not_before_timestamp=recovery_cutoff,
+                manual_takeover_after=manual_takeover_after,
             ):
                 if values[0] in failed_chats:
                     continue

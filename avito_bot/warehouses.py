@@ -10,6 +10,8 @@ class WarehouseOption:
     label: str
     service_center: str
     address: str
+    internship_time: str
+    aliases: tuple[str, ...] = ()
 
 
 MOSCOW_WAREHOUSES = (
@@ -19,38 +21,42 @@ MOSCOW_WAREHOUSES = (
         "Железнодорожный",
         "г. Балашиха, микрорайон Железнодорожный, улица Советская, "
         "владение 89, строение 1",
+        "7:00:00",
     ),
-    WarehouseOption(2, "Запад", "Запад", "МСК, Бережковская наб. 20, стр. 9"),
+    WarehouseOption(
+        2,
+        "Запад",
+        "Запад",
+        "МСК, Бережковская наб 20 стр 9",
+        "7:00:00",
+    ),
     WarehouseOption(
         3,
         "Кувекино",
         "Кувекино",
-        "д. Евсеево, ул. Евсеевская, д. 15, стр. 1",
+        "Москва, район Троицк, деревня Евсеево, Евсеевская улица, 15",
+        "8:00:00",
     ),
     WarehouseOption(
         4,
         "Печатники",
         "Печатники",
         "Курьяновская набережная, 6с2",
+        "7:30:00",
     ),
-    WarehouseOption(5, "Север", "Север", "Москва, Осташковское шоссе, 17А"),
+    WarehouseOption(
+        5,
+        "Север",
+        "Север",
+        "Москва Осташковское шоссе 17а",
+        "7:30:00",
+    ),
     WarehouseOption(
         6,
         "Строгино",
         "Строгино",
-        "Москва, 2-я Лыковская улица, д. 63, стр. 6",
-    ),
-    WarehouseOption(
-        7,
-        "СЦ Дзержинский",
-        "Дзержинский",
-        "Дзержинский, Садовая, 6",
-    ),
-    WarehouseOption(
-        8,
-        "СЦ Тарный",
-        "Тарный",
-        "Промышленная улица, 12А",
+        "Москва, 2-я Лыковская улица, д63, стр 6",
+        "8:30:00",
     ),
 )
 
@@ -59,15 +65,18 @@ SAINT_PETERSBURG_WAREHOUSES = (
         1,
         "Троицкий",
         "Троицкий",
-        "г. Санкт-Петербург, Запорожская улица, д. 12, строение 1. "
-        "Заезд через КПП по адресу: проспект Обуховской Обороны, 295БЖ",
+        "г. Санкт-Петербург, Запорожская улица, д.12, строение 1, "
+        "Заезд через КПП по адресу: Проспект Обуховской Обороны, 295БЖ",
+        "7:30:00",
     ),
     WarehouseOption(
         2,
         "Бугры",
         "Бугры",
         "Бугровское сельское поселение, деревня Порошкино, "
-        "23 км КАД (внутреннее кольцо), стр. 3",
+        "23 км КАД (внутреннее кольцо) ул., стр. 3",
+        "7:00:00",
+        ("Запад",),
     ),
 )
 
@@ -76,12 +85,38 @@ WAREHOUSE_GROUPS = {
     "saint_petersburg": SAINT_PETERSBURG_WAREHOUSES,
 }
 
+
+def replace_warehouse_groups(
+    groups: dict[str, tuple[WarehouseOption, ...]],
+) -> None:
+    # The customer explicitly retired the two former Moscow choices. Filter
+    # them at the catalog boundary as well, so a Google Sheet refresh cannot
+    # accidentally reintroduce them.
+    retired_moscow_centers = {"дзержинский", "тарный", "сц тарный"}
+    sanitized = dict(groups)
+    sanitized["moscow"] = tuple(
+        option
+        for option in groups.get("moscow", ())
+        if normalize_location(option.service_center) not in retired_moscow_centers
+    )
+    WAREHOUSE_GROUPS.clear()
+    WAREHOUSE_GROUPS.update(sanitized)
+
 MOSCOW_CITY_ALIASES = {
+    "балашиха",
+    "видное",
+    "домодедово",
+    "железнодорожный",
+    "королев",
+    "красногорск",
+    "лыткарино",
+    "люберцы",
     "москва",
     "мск",
     "мытищи",
     "дзержинский",
     "подольск",
+    "пушкино",
 }
 
 SAINT_PETERSBURG_CITY_ALIASES = {
@@ -129,21 +164,20 @@ def warehouse_prompt_for_city(city: str | None) -> str | None:
     if not options:
         return None
     lines = [
-        "Подберите для себя склад, с этого склада у вас начинается рабочий день "
-        "и там необходимо будет пройти стажировку:",
+        "Подобрали для вас склады — выберите удобный номером:",
         "",
     ]
     for option in options:
         lines.extend(
-            [f"{option.number}. {option.label}", f"   {option.address}", ""]
+            [
+                f"{option.number}. {option.label}",
+                f"   📍 {option.address}",
+                f"   🕥 Стажировка в {option.internship_time}",
+                "",
+            ]
         )
-    lines.extend(
-        [
-            "Выберите номер склада, который вам удобнее.",
-            "",
-            "0. Я передумал",
-        ]
-    )
+    max_number = options[-1].number
+    lines.append(f"Напишите номер подходящего склада (1–{max_number}) 👇")
     return "\n".join(lines)
 
 
@@ -161,6 +195,11 @@ def parse_warehouse_choice(
             return 0
         return next((option for option in options if option.number == number), None)
     for option in options:
-        if normalize_location(option.label) in normalized:
+        aliases = {
+            normalize_location(value)
+            for value in (option.label, option.service_center, *option.aliases)
+            if normalize_location(value)
+        }
+        if _contains_location_alias(normalized, aliases):
             return option
     return None

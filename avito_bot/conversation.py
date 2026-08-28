@@ -8,7 +8,11 @@ from typing import Any
 
 from .avito_client import AvitoClient
 from .candidate import normalize_phone, resolve_internship_date, split_full_name
-from .warehouses import parse_warehouse_choice, warehouse_prompt_for_city
+from .warehouses import (
+    parse_warehouse_choice,
+    warehouse_prompt_for_city,
+    warehouses_for_city,
+)
 
 
 @dataclass
@@ -24,10 +28,14 @@ class ConversationState:
     service_center: str | None = None
     warehouse_choice: int | None = None
     warehouse_selection_source: str | None = None
-    address: str | None = None
     internship_time: str | None = None
+    intro_messages_sent: int = 0
+    intro_trigger_message_id: str | None = None
     regional_intro_messages_sent: int = 0
     regional_intro_trigger_message_id: str | None = None
+    address: str | None = None
+    manual_takeover_at: str | None = None
+    manual_takeover_message_id: str | None = None
     date_time: str | None = None
     internship_date: str | None = None
     tariff: str = "Драйв"
@@ -101,85 +109,98 @@ ADDRESS_BY_CITY = {
 }
 
 INITIAL_MESSAGE = (
-    "Вы вовремя откликнулись 👌\n"
-    "Сейчас отправлю детали по вакансии.\n\n"
-    "На этой неделе у нас изменились условия в лучшую сторону: авто компании теперь предоставляем бесплатно, бензин и обслуживание - за наш счёт.\n\n"
-    "Расскажу подробнее в течении 1 минуты, ожидайте сообщения здесь"
+    "1. 🚚 Водитель в Яндекс Маркет (на авто компании)\n\n"
+    "Мы предлагаем работу на комфортных фургонах Ford Transit (МКПП). "
+    "🕶 Все расходы мы берем на себя — вы просто зарабатываете.\n\n"
+    "💰 Условия и доход\n\n"
+    "• Ваша прибыль — это чистый доход: Мы полностью оплачиваем бензин, "
+    "парковки и техническое обслуживание.\n\n"
+    "• Прозрачная оплата: от 6 000 ₽ за смену.\n\n"
+    "• Высокий потенциал: Доход до 240 000 ₽ в месяц."
 )
 
 FOLLOW_UP_MESSAGE = (
-    "Доброго времени суток!\n"
-    "Спасибо за интерес к вакансии!\n\n"
-    "Мы Яндекс Маркет — работа со складов до ПВЗ, постаматов и клиентов.🚚\n"
-    "Даём авто в аренду бесплатно (Ford Transit МКПП), возможно домашнее хранение. Расходы на бензин, парковки или обслуживание все за наш счет. Ваш доход — это полностью ваш доход.\n\n"
-    "🔻Доход считается за рейс, 1 рейс от 4 400,00.\n\n"
-    "🔻Ваша задача — утром загрузиться на складе и развести товар(мелкие посылки) по пунктам выдачи. После обеда возможна вторая загрузка.\n"
-    "Первая загрузка строго утром.\n\n"
-    "🔻График работы индивидуальный, подбираете самостоятельно. Оформление возможно по СМЗ или ГПХ. Выплаты 2 раза в месяц, возможно на любую карту. Доход до 160 000р в мес.\n\n"
-    "Если вам интересно — напишите «Да»."
+    "🛠 О работе\n\n"
+    "• Задачи: Утренняя загрузка на складе и доставка мелкогабаритных "
+    "посылок по ПВЗ и постаматам. Возможна вторая загрузка после обеда.\n\n"
+    "• Комфорт: Возможно домашнее хранение автомобиля.\n\n"
+    "• График: Вы сами выбираете удобные дни для работы.\n\n"
+    "📝 Что требуется от вас?\n\n"
+    "• Стаж вождения — более 2х лет.\n\n"
+    "❌ Мы убрали все барьеры для старта: вам не нужно тратить деньги "
+    "на аренду машины или топливо.\n\n"
+    "✅ Вы выходите на смену, выполняете рейсы и забираете честно "
+    "заработанные деньги.\n\n"
+    "📍 Обучение: утром встреча с бригадиром — за 4–6 часов узнаете всё "
+    "о работе изнутри. Оформление документов сразу после обучения."
 )
 
-INTERNSHIP_MESSAGE = (
-    "У нас предусмотрена стажировка, на которой бригадир покажет вам процесс работы, а после можно будет забрать машину и начать работу.\n"
-    "Стажировка начинается строго утром и занимает от 4х до 6 часов. После нее сможете перейти к оформлению.\n\n"
-    "Готовы пройти стажировку? Напишите «Да»"
-)
 
 
 
 
-
-
-ADDRESS_MESSAGE = (
-    "Стажировка каждый день в 8 утра, на какой день вас записать? Укажите день недели например: Вторник"
-)
-
-STORE_SELECTION_MESSAGE = (
-    "Стажировка каждый день в 8 утра, на какой день вас записать? Укажите день недели например: Вторник"
-   )
 
 CONFIRMATION_MESSAGE = (
     "Для пропуска пришлите Фамилию Имя, без пропуска вы не сможете попасть на склад. Напишите это сейчас"
 )
 
 
+def initial_messages_for_city(city: str | None) -> tuple[str, ...]:
+    warehouse_prompt = warehouse_prompt_for_city(city)
+    if not warehouse_prompt:
+        return ()
+    return INITIAL_MESSAGE, FOLLOW_UP_MESSAGE, warehouse_prompt
+
+
+def internship_day_message(internship_time: str) -> str:
+    return (
+        f"Стажировка каждый день в {internship_time}, на какой день вас "
+        "записать? Укажите день недели например: Вторник"
+    )
+
+
+def selected_internship_time(state: ConversationState) -> str | None:
+    if state.internship_time:
+        return state.internship_time
+    for option in warehouses_for_city(state.city):
+        if (
+            state.warehouse_choice == option.number
+            or state.service_center == option.service_center
+            or state.address == option.address
+        ):
+            state.internship_time = option.internship_time
+            return option.internship_time
+    return None
+
+
 def handle_user_message(state: ConversationState, text: str, client: AvitoClient | None = None, chat_id: str | None = None, city_hint: str | None = None) -> str:
     cleaned = (text or "").strip().lower()
 
+    if state.step == "unsupported":
+        return ""
+
+    if state.step == "idle":
+        state.city = normalize_city(city_hint) or state.city
+        if not initial_messages_for_city(state.city):
+            state.step = "unsupported"
+            return ""
+        state.step = "awaiting_warehouse"
+        return INITIAL_MESSAGE
+
     if asks_for_address(cleaned):
         state.city = normalize_city(city_hint) or state.city
+        if state.step == "awaiting_warehouse":
+            state.address = None
+            prompt = warehouse_prompt_for_city(state.city)
+            if prompt:
+                return (
+                    "Адрес зависит от выбранного склада. "
+                    "Укажите удобный склад номером:\n\n"
+                    f"{prompt}"
+                )
         address = state.address or resolve_address(state.city)
         state.address = address
         return WAREHOUSE_ADDRESS_MESSAGE.format(address=address)
-
-    if state.step == "idle":
-        state.step = "awaiting_interest"
-        return INITIAL_MESSAGE
-
-    if state.step == "awaiting_interest":
-        if is_positive(cleaned):
-            state.step = "awaiting_staj"
-            return INTERNSHIP_MESSAGE
-        return INTERNSHIP_MESSAGE
-
-    if state.step == "awaiting_staj":
-        warehouse_prompt = warehouse_prompt_for_city(city_hint or state.city)
-        if warehouse_prompt and (is_positive(cleaned) or looks_like_datetime(cleaned)):
-            state.city = normalize_city(city_hint) or state.city
-            state.step = "awaiting_warehouse"
-            return warehouse_prompt
-        if looks_like_datetime(cleaned):
-            state.date_time = text.strip()
-            state.internship_date = resolve_internship_date(text).strftime("%d.%m.%Y")
-            state.step = "awaiting_full_name"
-            return CONFIRMATION_MESSAGE
-        if is_positive(cleaned):
-            state.step = "awaiting_datetime"
-            state.city = normalize_city(city_hint) or state.city
-            address = resolve_address(state.city)
-            state.address = address
-            return ADDRESS_MESSAGE.format(address=address)
-        return "Готовы пройти стажировку?"
 
     if state.step == "awaiting_warehouse":
         state.city = normalize_city(city_hint) or state.city
@@ -198,8 +219,9 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
         state.warehouse_selection_source = "candidate"
         state.service_center = choice.service_center
         state.address = choice.address
+        state.internship_time = choice.internship_time
         state.step = "awaiting_datetime"
-        return ADDRESS_MESSAGE
+        return internship_day_message(choice.internship_time)
 
     if state.step == "awaiting_arrival":
         if looks_like_datetime(cleaned):
@@ -208,9 +230,19 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
             state.step = "awaiting_full_name"
             return CONFIRMATION_MESSAGE
         if is_positive(cleaned):
-            state.step = "awaiting_datetime"
-            return STORE_SELECTION_MESSAGE.format(city=state.city or "вашем городе", address=state.address or ADDRESS_FALLBACK)
-        return "Стажировка каждый день в 8 утра на какой день вас записать? Укажите день недели например: Вторник"
+            internship_time = selected_internship_time(state)
+            if internship_time:
+                state.step = "awaiting_datetime"
+                return internship_day_message(internship_time)
+        prompt = warehouse_prompt_for_city(state.city)
+        if prompt:
+            state.step = "awaiting_warehouse"
+            return (
+                "Чтобы указать точное время стажировки, выберите склад "
+                "номером:\n\n"
+                f"{prompt}"
+            )
+        return ""
 
     if state.step == "awaiting_datetime":
         try:
@@ -257,19 +289,35 @@ def handle_webhook_event(client: AvitoClient, state: ConversationState, payload:
 
     chat_id = _extract_chat_id(payload)
     city_hint = _extract_city(payload)
+    if state.step == "idle":
+        state.city = normalize_city(city_hint) or state.city
+        messages = initial_messages_for_city(state.city)
+        if not messages:
+            state.step = "unsupported"
+            return {"status": "ignored", "chat_id": chat_id}
+        try:
+            for message in messages:
+                client.send_message(chat_id, message)
+        except Exception as exc:
+            return {
+                "status": "error",
+                "chat_id": chat_id,
+                "error": str(exc),
+            }
+        state.intro_messages_sent = len(messages)
+        state.step = "awaiting_warehouse"
+        return {
+            "status": "processed",
+            "replies": list(messages),
+            "chat_id": chat_id,
+        }
+
     reply = handle_user_message(state, message_text, client=client, chat_id=chat_id, city_hint=city_hint)
 
     if not reply:
         return {"status": "ignored", "chat_id": chat_id}
 
-    if reply == INITIAL_MESSAGE:
-        try:
-            client.send_message(chat_id, reply)
-        except Exception as exc:
-            return {"status": "error", "reply": reply, "chat_id": chat_id, "error": str(exc)}
-        schedule_delayed_message(client, chat_id, FOLLOW_UP_MESSAGE, delay=5)
-    else:
-        schedule_delayed_message(client, chat_id, reply, delay=2)
+    schedule_delayed_message(client, chat_id, reply, delay=2)
 
     return {"status": "processed", "reply": reply, "chat_id": chat_id}
 

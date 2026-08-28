@@ -20,6 +20,19 @@ def test_state_and_processed_messages_survive_reopen(tmp_path):
     second.close()
 
 
+def test_bot_outgoing_message_ids_survive_reopen(tmp_path):
+    path = tmp_path / "bot-outgoing.sqlite3"
+    first = SQLiteStateStore(path)
+    first.mark_bot_outgoing("chat-1", "outgoing-1")
+    first.close()
+
+    second = SQLiteStateStore(path)
+
+    assert second.is_bot_outgoing("chat-1", "outgoing-1")
+    assert not second.is_bot_outgoing("chat-1", "manual-1")
+    second.close()
+
+
 def test_interrupted_submission_is_quarantined_without_retry(tmp_path):
     path = tmp_path / "interrupted.sqlite3"
     store = SQLiteStateStore(path)

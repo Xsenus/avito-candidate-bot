@@ -14,7 +14,7 @@ from avito_bot.service_centers import (
     parse_service_center_overrides,
     resolve_service_center,
 )
-from avito_bot.warehouses import warehouse_group_for_city
+from avito_bot.warehouses import WAREHOUSE_GROUPS, warehouse_group_for_city
 from avito_bot.yandex_form import CandidateApplication, YandexFormSubmitter
 
 
@@ -53,6 +53,9 @@ def load_active_warehouses() -> list[str]:
         user_id=os.getenv("AVITO_USER_ID", ""),
         base_url=os.getenv("AVITO_BASE_URL", "https://api.avito.ru"),
     )
+    client.get_chats(unread_only=False, limit=1)
+    client.get_chats(unread_only=False, limit=1)
+
     catalog = GoogleSheetInvitationSource(
         os.getenv("INVITATIONS_SHEET_ID", "1D6aP4Vjt05QMRIogvdtX0wKblbgnNrg-I8lF0Fq26zs"),
         os.getenv("INVITATIONS_SHEET_GID", "420777109"),
@@ -85,17 +88,16 @@ def load_active_warehouses() -> list[str]:
         item_id = str(value.get("id") or "").strip() or None
         if not isinstance(city, str) or not city.strip():
             continue
-        if warehouse_group_for_city(city) is None:
-            regional = regional_locations.resolve(
-                city, item_id, center_overrides
-            )
-            catalog.find(regional.service_center)
-            selection = ServiceCenterSelection(regional.service_center)
-        else:
-            selection = resolve_service_center(
-                city, item_id, catalog, center_overrides
-            )
+        if warehouse_group_for_city(city) is not None:
+            continue
+        regional = regional_locations.resolve(city, item_id, center_overrides)
+        catalog.find(regional.service_center)
+        selection = ServiceCenterSelection(regional.service_center)
         warehouses.add(form_option_for(selection.name, form_overrides))
+    for options in WAREHOUSE_GROUPS.values():
+        for option in options:
+            catalog.find(option.service_center)
+            warehouses.add(form_option_for(option.service_center, form_overrides))
     if not warehouses:
         warehouses.add(os.getenv("YANDEX_FORM_TEST_WAREHOUSE", "СЦ Кемерово"))
     return sorted(warehouses)
