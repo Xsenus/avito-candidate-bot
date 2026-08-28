@@ -138,11 +138,11 @@ def test_moscow_region_starts_with_three_messages(city):
     assert all(len(message) <= 1000 for message in messages)
 
 
-def test_moscow_and_saint_petersburg_price_is_per_shift():
+def test_moscow_and_saint_petersburg_price_is_per_trip():
     for city in ("Москва", "Санкт-Петербург"):
         messages = initial_messages_for_city(city)
-        assert "от 6 000 ₽ за смену" in messages[0]
-        assert "за рейс" not in messages[0]
+        assert "от 6 000 ₽ за рейс" in messages[0]
+        assert "за смену" not in messages[0]
 
 
 @pytest.mark.parametrize("city", ["Санкт-Петербург", "СПб", "Бугры"])
