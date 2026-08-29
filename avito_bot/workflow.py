@@ -40,6 +40,13 @@ class CandidateWorkflow:
         source = GoogleSheetInvitationSource(
             os.getenv("INVITATIONS_SHEET_ID", "1D6aP4Vjt05QMRIogvdtX0wKblbgnNrg-I8lF0Fq26zs"),
             os.getenv("INVITATIONS_SHEET_GID", "420777109"),
+            cache_path=os.getenv(
+                "INVITATIONS_CACHE_PATH", "data/invitations.csv"
+            ),
+            refresh_interval_seconds=max(
+                1,
+                int(os.getenv("INVITATIONS_REFRESH_SECONDS", "300")),
+            ),
         )
         overrides = parse_service_center_overrides(
             os.getenv("SERVICE_CENTER_OVERRIDES_JSON", "")

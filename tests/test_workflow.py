@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from avito_bot.conversation import ConversationState
 from avito_bot.invitations import InvitationCatalog
 from avito_bot.workflow import CandidateWorkflow, mark_invitation_sent
@@ -162,3 +164,16 @@ def test_unknown_submit_result_is_not_automatically_retried():
 
     assert state.application_status == "uncertain"
     assert state.last_error == "submit result unknown"
+
+
+def test_workflow_from_env_configures_persistent_invitation_cache(
+    tmp_path, monkeypatch
+):
+    cache_path = tmp_path / "invitation-cache.csv"
+    monkeypatch.setenv("INVITATIONS_CACHE_PATH", str(cache_path))
+    monkeypatch.setenv("INVITATIONS_REFRESH_SECONDS", "900")
+
+    workflow = CandidateWorkflow.from_env(FakeForm())
+
+    assert workflow.invitation_source.cache_path == Path(cache_path)
+    assert workflow.invitation_source.refresh_interval_seconds == 900

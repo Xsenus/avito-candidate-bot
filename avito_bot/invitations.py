@@ -4,9 +4,12 @@ import csv
 import io
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Protocol
+from pathlib import Path
+from typing import Callable, Protocol
 
 import requests
 
@@ -131,6 +134,9 @@ class GoogleSheetInvitationSource:
         sheet_gid: str = DEFAULT_SHEET_GID,
         *,
         http: HttpClient | None = None,
+        cache_path: str | Path | None = None,
+        refresh_interval_seconds: float = 300,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", sheet_id):
             raise ValueError("Некорректный ID Google-таблицы")
@@ -139,6 +145,14 @@ class GoogleSheetInvitationSource:
         self.sheet_id = sheet_id
         self.sheet_gid = sheet_gid
         self.http = http or requests
+        self.cache_path = Path(cache_path) if cache_path is not None else None
+        self.refresh_interval_seconds = max(1.0, float(refresh_interval_seconds))
+        self.clock = clock
+        self.last_load_used_cache = False
+        self.last_error: Exception | None = None
+        self._catalog: InvitationCatalog | None = None
+        self._next_refresh_at = 0.0
+        self._lock = threading.Lock()
 
     @property
     def csv_url(self) -> str:
@@ -148,9 +162,65 @@ class GoogleSheetInvitationSource:
         )
 
     def load(self) -> InvitationCatalog:
-        response = self.http.get(self.csv_url, timeout=30)
-        response.raise_for_status()
-        return InvitationCatalog.from_csv(response.text)
+        with self._lock:
+            now = self.clock()
+            if self._catalog is not None and now < self._next_refresh_at:
+                return self._catalog
+
+            if self._catalog is None:
+                cached = self._load_cache()
+                if cached is not None:
+                    self._catalog = cached
+                    self._next_refresh_at = now + self.refresh_interval_seconds
+                    self.last_load_used_cache = True
+                    self.last_error = None
+                    return cached
+
+            try:
+                response = self.http.get(self.csv_url, timeout=30)
+                response.raise_for_status()
+                content = response.text
+                refreshed = InvitationCatalog.from_csv(content)
+            except Exception as exc:
+                self.last_error = exc
+                self._next_refresh_at = now + self.refresh_interval_seconds
+                if self._catalog is not None:
+                    self.last_load_used_cache = True
+                    return self._catalog
+                cached = self._load_cache()
+                if cached is not None:
+                    self._catalog = cached
+                    self.last_load_used_cache = True
+                    return cached
+                raise
+
+            self._catalog = refreshed
+            self._next_refresh_at = now + self.refresh_interval_seconds
+            self.last_load_used_cache = False
+            self.last_error = None
+            try:
+                self._write_cache(content)
+            except OSError as exc:
+                self.last_error = exc
+            return refreshed
+
+    def _load_cache(self) -> InvitationCatalog | None:
+        if self.cache_path is None or not self.cache_path.is_file():
+            return None
+        try:
+            return InvitationCatalog.from_csv(
+                self.cache_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, ValueError):
+            return None
+
+    def _write_cache(self, content: str) -> None:
+        if self.cache_path is None:
+            return
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
+        temporary.write_text(content, encoding="utf-8")
+        temporary.replace(self.cache_path)
 
 
 def normalize_service_center(value: str) -> str:

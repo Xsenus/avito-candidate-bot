@@ -31,6 +31,15 @@ class FakeHttp:
         return FakeResponse()
 
 
+class FailingHttp:
+    def __init__(self):
+        self.calls = []
+
+    def get(self, url, *, timeout):
+        self.calls.append((url, timeout))
+        raise RuntimeError("429 Too Many Requests")
+
+
 def test_catalog_parses_sheet_and_matches_sc_prefix():
     catalog = InvitationCatalog.from_csv(SAMPLE_CSV)
 
@@ -175,3 +184,93 @@ def test_google_source_uses_expected_csv_endpoint():
             30,
         )
     ]
+
+
+def test_google_source_persists_and_reuses_cache_after_restart(tmp_path):
+    cache_path = tmp_path / "invitations.csv"
+    live_http = FakeHttp()
+    live_source = GoogleSheetInvitationSource(
+        "sheet_123",
+        "420777109",
+        http=live_http,
+        cache_path=cache_path,
+    )
+
+    assert len(live_source.load()) == 2
+    assert cache_path.read_text(encoding="utf-8") == SAMPLE_CSV
+
+    failed_http = FailingHttp()
+    cached_source = GoogleSheetInvitationSource(
+        "sheet_123",
+        "420777109",
+        http=failed_http,
+        cache_path=cache_path,
+    )
+
+    assert len(cached_source.load()) == 2
+    assert cached_source.last_load_used_cache
+    assert failed_http.calls == []
+
+
+def test_google_source_keeps_last_catalog_when_refresh_is_rate_limited(tmp_path):
+    now = [0.0]
+    cache_path = tmp_path / "invitations.csv"
+    live_http = FakeHttp()
+    source = GoogleSheetInvitationSource(
+        "sheet_123",
+        "420777109",
+        http=live_http,
+        cache_path=cache_path,
+        refresh_interval_seconds=60,
+        clock=lambda: now[0],
+    )
+
+    initial = source.load()
+    source.http = FailingHttp()
+    now[0] = 61
+
+    refreshed = source.load()
+
+    assert refreshed is initial
+    assert source.last_load_used_cache
+    assert isinstance(source.last_error, RuntimeError)
+
+
+def test_google_source_retries_only_after_refresh_interval(tmp_path):
+    now = [0.0]
+    http = FakeHttp()
+    source = GoogleSheetInvitationSource(
+        "sheet_123",
+        "420777109",
+        http=http,
+        cache_path=tmp_path / "invitations.csv",
+        refresh_interval_seconds=60,
+        clock=lambda: now[0],
+    )
+
+    source.load()
+    now[0] = 59
+    source.load()
+    now[0] = 60
+    source.load()
+
+    assert len(http.calls) == 2
+
+
+def test_google_source_returns_live_catalog_when_cache_cannot_be_written(
+    tmp_path, monkeypatch
+):
+    source = GoogleSheetInvitationSource(
+        "sheet_123",
+        "420777109",
+        http=FakeHttp(),
+        cache_path=tmp_path / "invitations.csv",
+    )
+    monkeypatch.setattr(
+        source,
+        "_write_cache",
+        lambda content: (_ for _ in ()).throw(PermissionError("read only")),
+    )
+
+    assert len(source.load()) == 2
+    assert isinstance(source.last_error, PermissionError)
