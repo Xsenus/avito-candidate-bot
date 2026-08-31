@@ -188,17 +188,52 @@ class YandexFormSubmitter:
 
                     page.route("**/*", intercept_write)
 
-                page.get_by_role("button", name="Отправить").click()
+                submit_button = page.get_by_role("button", name="Отправить")
                 if intercept_submission:
+                    submit_button.click()
                     page.wait_for_timeout(min(3_000, self.timeout_ms))
                     self._verify_intercepted_submission(captured_writes, application)
                     return
-                success_url = re.compile(r"/success(?:[/?#]|$)", re.IGNORECASE)
+
+                submission_requests: list[dict[str, str | None]] = []
+
+                def observe_request(request) -> None:
+                    write = self._request_snapshot(request)
+                    if self._is_form_submission_write(write):
+                        submission_requests.append(write)
+
+                page.on("request", observe_request)
+                response = None
                 try:
-                    page.wait_for_url(success_url, timeout=self.timeout_ms)
-                    return
+                    with page.expect_response(
+                        lambda candidate: self._is_form_submission_write(
+                            self._request_snapshot(candidate.request)
+                        ),
+                        timeout=self.timeout_ms,
+                    ) as response_info:
+                        submit_button.click()
+                    response = response_info.value
                 except PlaywrightTimeoutError:
+                    # The request listener below tells apart a request which never
+                    # left the browser from one whose response was lost.
                     pass
+
+                if response is not None:
+                    response_payload = self._read_response_json(response)
+                    response_outcome = self._classify_submission_response(
+                        response.status, response_payload
+                    )
+                    if response_outcome == "accepted":
+                        return
+                    if response_outcome == "rejected":
+                        raise FormSubmissionError(
+                            "Яндекс Форма отклонила сохранение ответа "
+                            f"(HTTP {response.status})"
+                        )
+
+                success_url = re.compile(r"/success(?:[/?#]|$)", re.IGNORECASE)
+                if success_url.search(page.url):
+                    return
 
                 success_pattern = re.compile(
                     os.getenv(
@@ -214,14 +249,88 @@ class YandexFormSubmitter:
                 except PlaywrightTimeoutError as exc:
                     errors = page.locator('[role="alert"], [aria-invalid="true"]').all_inner_texts()
                     details = "; ".join(text.strip() for text in errors if text.strip())
-                    suffix = f": {details}" if details else ""
-                    error_type = FormSubmissionError if details else FormSubmissionUncertainError
-                    raise error_type(
-                        "Яндекс Форма не подтвердила сохранение ответа"
-                        f" (текущий адрес: {page.url}){suffix}"
+                    raise self._confirmation_error(
+                        details=details,
+                        submission_request_seen=bool(submission_requests),
+                        current_url=page.url,
                     ) from exc
             finally:
                 browser.close()
+
+    @staticmethod
+    def _request_snapshot(request) -> dict[str, str | None]:
+        return {
+            "method": request.method,
+            "url": request.url,
+            "post_data": request.post_data,
+            "content_type": request.headers.get("content-type"),
+        }
+
+    @staticmethod
+    def _is_form_submission_write(write: dict[str, str | None]) -> bool:
+        method = (write.get("method") or "").upper()
+        url = (write.get("url") or "").lower()
+        post_data = write.get("post_data")
+        return (
+            method == "POST"
+            and "forms.yandex.ru" in url
+            and "postsurvey" in url
+            and bool(post_data)
+        )
+
+    @staticmethod
+    def _read_response_json(response):
+        try:
+            return response.json()
+        except Exception:
+            return None
+
+    @classmethod
+    def _classify_submission_response(cls, status: int, payload) -> str:
+        """Classify server evidence without relying on a client-side redirect."""
+        if status < 200 or status >= 400:
+            return "rejected"
+        if status >= 300:
+            return "unknown"
+        if cls._payload_has_explicit_failure(payload):
+            return "rejected"
+        return "accepted"
+
+    @classmethod
+    def _payload_has_explicit_failure(cls, value) -> bool:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized = str(key).strip().lower()
+                if normalized == "success" and child is False:
+                    return True
+                if normalized in {"error", "errors"} and child:
+                    return True
+                if normalized == "status" and str(child).strip().lower() in {
+                    "error",
+                    "failed",
+                    "failure",
+                }:
+                    return True
+                if cls._payload_has_explicit_failure(child):
+                    return True
+        elif isinstance(value, list):
+            return any(cls._payload_has_explicit_failure(child) for child in value)
+        return False
+
+    @staticmethod
+    def _confirmation_error(
+        *, details: str, submission_request_seen: bool, current_url: str
+    ) -> FormSubmissionError:
+        suffix = f": {details}" if details else ""
+        error_type = (
+            FormSubmissionUncertainError
+            if submission_request_seen and not details
+            else FormSubmissionError
+        )
+        return error_type(
+            "Яндекс Форма не подтвердила сохранение ответа"
+            f" (текущий адрес: {current_url}){suffix}"
+        )
 
     @staticmethod
     def _verify_intercepted_submission(
@@ -230,9 +339,7 @@ class YandexFormSubmitter:
         candidates = [
             write
             for write in writes
-            if (write.get("method") or "").upper() == "POST"
-            and "forms.yandex.ru" in (write.get("url") or "")
-            and write.get("post_data")
+            if YandexFormSubmitter._is_form_submission_write(write)
         ]
         if len(candidates) != 1:
             raise FormSubmissionError(

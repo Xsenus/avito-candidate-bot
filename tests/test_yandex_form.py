@@ -5,6 +5,7 @@ from avito_bot.yandex_form import (
     CandidateApplication,
     FormConfigurationError,
     FormSubmissionError,
+    FormSubmissionUncertainError,
     YandexFormSubmitter,
 )
 
@@ -141,6 +142,79 @@ def test_intercepted_submission_rejects_missing_phone():
             ],
             application(),
         )
+
+
+def test_submission_write_detection_ignores_unrelated_form_requests():
+    submit = {
+        "method": "POST",
+        "url": "https://forms.yandex.ru/gateway/root/form/postSurvey",
+        "post_data": '{"values": {}}',
+        "content_type": "application/json",
+    }
+
+    assert YandexFormSubmitter._is_form_submission_write(submit)
+    assert not YandexFormSubmitter._is_form_submission_write(
+        {**submit, "method": "GET"}
+    )
+    assert not YandexFormSubmitter._is_form_submission_write(
+        {**submit, "url": "https://forms.yandex.ru/analytics"}
+    )
+    assert not YandexFormSubmitter._is_form_submission_write(
+        {**submit, "url": "https://example.com/form/postSurvey"}
+    )
+
+
+@pytest.mark.parametrize("payload", [None, {}, {"status": "ok"}, {"success": True}])
+def test_successful_submission_response_is_authoritative(payload):
+    assert YandexFormSubmitter._classify_submission_response(200, payload) == "accepted"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"success": False},
+        {"status": "failed"},
+        {"result": {"errors": ["invalid answer"]}},
+    ],
+)
+def test_success_status_with_explicit_form_failure_is_rejected(payload):
+    assert YandexFormSubmitter._classify_submission_response(200, payload) == "rejected"
+
+
+def test_http_failure_is_retryable_and_redirect_alone_is_not_conclusive():
+    assert YandexFormSubmitter._classify_submission_response(429, None) == "rejected"
+    assert YandexFormSubmitter._classify_submission_response(503, None) == "rejected"
+    assert YandexFormSubmitter._classify_submission_response(302, None) == "unknown"
+
+
+def test_missing_submission_request_is_safe_to_retry():
+    error = YandexFormSubmitter._confirmation_error(
+        details="",
+        submission_request_seen=False,
+        current_url="https://forms.yandex.ru/example",
+    )
+
+    assert type(error) is FormSubmissionError
+
+
+def test_lost_response_after_submission_request_stays_uncertain():
+    error = YandexFormSubmitter._confirmation_error(
+        details="",
+        submission_request_seen=True,
+        current_url="https://forms.yandex.ru/example",
+    )
+
+    assert isinstance(error, FormSubmissionUncertainError)
+
+
+def test_visible_form_validation_error_is_safe_to_retry():
+    error = YandexFormSubmitter._confirmation_error(
+        details="Обязательное поле не заполнено",
+        submission_request_seen=True,
+        current_url="https://forms.yandex.ru/example",
+    )
+
+    assert type(error) is FormSubmissionError
 
 
 class ConsentLocator:
