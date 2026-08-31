@@ -974,76 +974,29 @@ def main() -> None:
         f"warehouse_locations_refresh={warehouse_refresh_seconds}s"
     )
 
+    recovery_key = "unanswered_recovery_started_at_v1"
+    recovery_started_at = store.get_metadata(recovery_key)
+    if recovery_started_at is None:
+        recovery_cutoff = datetime.now(timezone.utc).timestamp()
+        store.set_metadata(recovery_key, str(recovery_cutoff))
+        print(
+            "Unanswered application recovery baseline initialized; "
+            "pre-existing applications were skipped"
+        )
+    else:
+        try:
+            recovery_cutoff = float(recovery_started_at)
+        except ValueError:
+            recovery_cutoff = datetime.now(timezone.utc).timestamp()
+            store.set_metadata(recovery_key, str(recovery_cutoff))
+
     try:
         client.get_access_token()
         print("Avito auth OK")
     except Exception as exc:
-        print(f"Avito auth failed: {exc}")
-        return
+        print(f"WARNING: initial Avito auth failed; polling will retry: {exc}")
 
-
-    try:
-        initial_chats = client.get_chats(
-            unread_only=False, limit=CHAT_PAGE_LIMIT
-        )
-        initialize_message_cursor(client, store, initial_chats)
-        migrated_completed = migrate_legacy_completed_chats(
-            client, store, initial_chats
-        )
-        repaired, returned = reconcile_incomplete_applications(client, store)
-        recovered_unanswered = 0
-        recovery_key = "unanswered_recovery_started_at_v1"
-        recovery_started_at = store.get_metadata(recovery_key)
-        if recovery_started_at is None:
-            recovery_cutoff = datetime.now(timezone.utc).timestamp()
-            store.set_metadata(
-                recovery_key,
-                str(recovery_cutoff),
-            )
-            print(
-                "Unanswered application recovery baseline initialized; "
-                "pre-existing applications were skipped"
-            )
-        else:
-            try:
-                recovery_cutoff = float(recovery_started_at)
-            except ValueError:
-                recovery_cutoff = datetime.now(timezone.utc).timestamp()
-                store.set_metadata(recovery_key, str(recovery_cutoff))
-            for values in iter_unanswered_job_applications(
-                client,
-                initial_chats,
-                store,
-                not_before_timestamp=recovery_cutoff,
-            ):
-                try:
-                    process_chat_message(
-                        client,
-                        workflow,
-                        store,
-                        *values,
-                        regional_locations=regional_locations,
-                        regional_overrides=regional_overrides,
-                    )
-                    recovered_unanswered += 1
-                except Exception as exc:
-                    print(
-                        f"unanswered application recovery error "
-                        f"chat_id={values[0]}: {exc}"
-                    )
-        if migrated_completed:
-            print(f"Migrated legacy completed chats: {migrated_completed}")
-        if repaired or returned:
-            print(
-                f"Reconciled legacy applications: repaired={repaired}, "
-                f"returned_to_collection={returned}"
-            )
-        if recovered_unanswered:
-            print(f"Recovered unanswered applications: {recovered_unanswered}")
-    except Exception as exc:
-        print(f"Failed to initialize message cursor: {exc}")
-        return
-
+    startup_initialization_pending = True
     consecutive_poll_errors = 0
     processed_since_health = 0
     health_interval = max(
@@ -1092,6 +1045,53 @@ def main() -> None:
             chats = client.get_chats(
                 unread_only=False, limit=CHAT_PAGE_LIMIT
             )
+            if startup_initialization_pending:
+                initialize_message_cursor(client, store, chats)
+                migrated_completed = migrate_legacy_completed_chats(
+                    client, store, chats
+                )
+                repaired, returned = reconcile_incomplete_applications(
+                    client, store
+                )
+                recovered_unanswered = 0
+                for values in iter_unanswered_job_applications(
+                    client,
+                    chats,
+                    store,
+                    not_before_timestamp=recovery_cutoff,
+                ):
+                    try:
+                        process_chat_message(
+                            client,
+                            workflow,
+                            store,
+                            *values,
+                            regional_locations=regional_locations,
+                            regional_overrides=regional_overrides,
+                        )
+                        recovered_unanswered += 1
+                    except Exception as exc:
+                        print(
+                            "unanswered application recovery error "
+                            f"chat_id={values[0]}: {exc}"
+                        )
+                if migrated_completed:
+                    print(
+                        f"Migrated legacy completed chats: {migrated_completed}"
+                    )
+                if repaired or returned:
+                    print(
+                        "Reconciled legacy applications: "
+                        f"repaired={repaired}, "
+                        f"returned_to_collection={returned}"
+                    )
+                if recovered_unanswered:
+                    print(
+                        "Recovered unanswered applications: "
+                        f"{recovered_unanswered}"
+                    )
+                startup_initialization_pending = False
+                print("Poller startup initialization completed")
             failed_chats: set[str] = set()
             for values in iter_new_chat_messages(
                 client,

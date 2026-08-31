@@ -1,5 +1,7 @@
 import pytest
 
+import poller as poller_module
+
 from avito_bot.conversation import INITIAL_MESSAGE, ConversationState
 from avito_bot.invitations import InvitationCatalog
 from avito_bot.regional_locations import RegionalLocationCatalog
@@ -20,6 +22,79 @@ from poller import (
     schedule_retry,
     send_bot_message,
 )
+
+
+def test_main_retries_transient_avito_failure_without_exiting(
+    tmp_path, monkeypatch, capsys
+):
+    class StopPolling(Exception):
+        pass
+
+    class FakeClient:
+        instance = None
+
+        def __init__(self, **kwargs):
+            self.get_chats_calls = 0
+            FakeClient.instance = self
+
+        def get_access_token(self):
+            raise RuntimeError("temporary auth failure")
+
+        def get_chats(self, *, unread_only, limit):
+            self.get_chats_calls += 1
+            if self.get_chats_calls == 1:
+                raise RuntimeError("temporary Avito 500")
+            return []
+
+    class EmptyRegionalCatalog:
+        def __len__(self):
+            return 0
+
+    class FakeRegionalProvider:
+        def __init__(self, *args, **kwargs):
+            self.catalog = EmptyRegionalCatalog()
+            self.next_refresh_at = float("inf")
+
+    class FakeWarehouseProvider:
+        def __init__(self, *args, **kwargs):
+            self.groups = poller_module.WAREHOUSE_GROUPS
+            self.next_refresh_at = float("inf")
+
+    sleep_calls = 0
+
+    def stop_after_successful_retry(seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            raise StopPolling
+
+    for name, value in {
+        "AVITO_CLIENT_ID": "test-client",
+        "AVITO_CLIENT_SECRET": "test-secret",
+        "AVITO_USER_ID": "test-user",
+        "STATE_DB_PATH": str(tmp_path / "startup-retry.sqlite3"),
+        "POLL_INTERVAL_SECONDS": "5",
+        "PAUSE_ON_MANUAL_OUTGOING": "false",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(poller_module, "AvitoClient", FakeClient)
+    monkeypatch.setattr(
+        poller_module, "RefreshingRegionalLocationProvider", FakeRegionalProvider
+    )
+    monkeypatch.setattr(
+        poller_module, "RefreshingWarehouseProvider", FakeWarehouseProvider
+    )
+    monkeypatch.setattr(poller_module, "replace_warehouse_groups", lambda groups: None)
+    monkeypatch.setattr(poller_module.time, "sleep", stop_after_successful_retry)
+
+    with pytest.raises(StopPolling):
+        poller_module.main()
+
+    output = capsys.readouterr().out
+    assert "initial Avito auth failed; polling will retry" in output
+    assert "poller error: temporary Avito 500" in output
+    assert "Poller startup initialization completed" in output
+    assert FakeClient.instance.get_chats_calls == 2
 
 LEGACY_DAY_PROMPT = (
     "Стажировка каждый день в 8 утра, на какой день вас записать? "
