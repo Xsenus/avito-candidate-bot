@@ -2,8 +2,10 @@ import pytest
 
 from avito_bot.conversation import (
     ADDRESS_FALLBACK,
+    CALL_HANDOFF_MESSAGE,
     FOLLOW_UP_MESSAGE,
     INITIAL_MESSAGE,
+    MORE_INFO_MESSAGE,
     ConversationState,
     handle_user_message,
     initial_messages_for_city,
@@ -264,21 +266,62 @@ def test_address_question_after_warehouse_choice_returns_selected_address():
     assert reply == "Адрес склада: Курьяновская набережная, 6с2"
 
 
-def test_invalid_warehouse_choice_does_not_advance():
+def test_invalid_warehouse_choice_offers_hr_call_without_more_reminders():
     state = ConversationState(step="awaiting_warehouse", city="Санкт-Петербург")
 
     reply = handle_user_message(state, "что-нибудь", city_hint=state.city)
 
-    assert state.step == "awaiting_warehouse"
+    assert state.step == "awaiting_call"
     assert state.service_center is None
-    assert "Укажите номер" in reply
+    assert reply == MORE_INFO_MESSAGE
+    assert state.reminders_stopped
 
 
-def test_zero_cancels_application_and_makes_it_terminal():
+def test_zero_offers_hr_call_and_stops_reminders():
     state = ConversationState(step="awaiting_warehouse", city="Москва")
 
     reply = handle_user_message(state, "0", city_hint=state.city)
 
-    assert state.step == "done"
-    assert state.application_status == "cancelled"
-    assert "отменил" in reply
+    assert state.step == "awaiting_call"
+    assert state.application_status == "collecting"
+    assert reply == MORE_INFO_MESSAGE
+    assert state.reminders_stopped
+
+
+@pytest.mark.parametrize("answer", ["Звонок", " звонок! ", "Хочу ЗВОНОК"])
+def test_call_request_hands_dialog_to_hr(answer):
+    state = ConversationState(
+        step="awaiting_datetime",
+        city="Тула",
+        reminder_step="awaiting_datetime",
+        reminder_due_at="2026-09-03T10:00:00+00:00",
+    )
+
+    reply = handle_user_message(state, answer)
+
+    assert reply == CALL_HANDOFF_MESSAGE
+    assert state.step == "manual_takeover"
+    assert state.application_status == "manual"
+    assert state.reminders_stopped
+    assert state.reminder_due_at is None
+
+
+def test_unknown_date_answer_offers_hr_call_without_more_reminders():
+    state = ConversationState(step="awaiting_datetime", city="Тула")
+
+    reply = handle_user_message(state, "Расскажите подробнее")
+
+    assert reply == MORE_INFO_MESSAGE
+    assert state.step == "awaiting_call"
+    assert state.reminders_stopped
+
+
+def test_awaiting_call_repeats_only_hr_offer_until_call_is_requested():
+    state = ConversationState(
+        step="awaiting_call", city="Тула", reminders_stopped=True
+    )
+
+    assert handle_user_message(state, "Хорошо") == MORE_INFO_MESSAGE
+    assert state.step == "awaiting_call"
+    assert handle_user_message(state, "Звонок") == CALL_HANDOFF_MESSAGE
+    assert state.step == "manual_takeover"

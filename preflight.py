@@ -6,8 +6,10 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 
 from avito_bot.avito_client import AvitoClient
+from avito_bot.conversation import ConversationState
 from avito_bot.invitations import GoogleSheetInvitationSource
 from avito_bot.regional_locations import GoogleSheetRegionalLocationSource
+from avito_bot.reminders import ReminderConfig, reminder_message
 from avito_bot.service_centers import (
     ServiceCenterSelection,
     form_option_for,
@@ -44,6 +46,17 @@ def main() -> None:
         f"Yandex Form warehouses: OK ({len(active_warehouses)} active options, "
         "response was not submitted)"
     )
+    reminder_config = ReminderConfig.from_env()
+    if reminder_config.enabled:
+        reminder_message(ConversationState(step="awaiting_datetime"))
+        for city in ("Москва", "Санкт-Петербург"):
+            reminder_message(
+                ConversationState(step="awaiting_warehouse", city=city)
+            )
+        print(
+            "Follow-up reminders: OK "
+            f"(sequential delays={reminder_config.delays_seconds}s)"
+        )
 
 
 def load_active_warehouses() -> list[str]:

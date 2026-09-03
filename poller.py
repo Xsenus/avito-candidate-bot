@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 import sys
 import time
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -13,30 +14,56 @@ PROJECT_ROOT = str(Path(__file__).resolve().parent)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from avito_bot.avito_client import AvitoClient
 from avito_bot.alerts import emit_alert
+from avito_bot.avito_client import AvitoClient
+from avito_bot.candidate import (
+    normalize_phone,
+    resolve_internship_date,
+    split_full_name,
+)
 from avito_bot.conversation import (
+    CALL_HANDOFF_MESSAGE,
     CONFIRMATION_MESSAGE,
+    DATE_REMINDER_MESSAGE,
     FOLLOW_UP_MESSAGE,
     INITIAL_MESSAGE,
+    MORE_INFO_MESSAGE,
     ConversationState,
     handle_user_message,
     initial_messages_for_city,
+    stop_reminders,
 )
-from avito_bot.candidate import normalize_phone, resolve_internship_date, split_full_name
 from avito_bot.regional_locations import (
     DEFAULT_SHEET_GID as DEFAULT_REGIONAL_LOCATIONS_GID,
+)
+from avito_bot.regional_locations import (
     DEFAULT_SHEET_ID as DEFAULT_REGIONAL_LOCATIONS_SHEET_ID,
+)
+from avito_bot.regional_locations import (
     GoogleSheetRegionalLocationSource,
-    RegionalLocationCatalog,
     RefreshingRegionalLocationProvider,
+    RegionalLocationCatalog,
     regional_initial_messages,
+)
+from avito_bot.reminders import (
+    ReminderConfig,
+    arm_reminders,
+    clear_inflight_for_retry,
+    finish_reminder,
+    inflight_retry_is_due,
+    mark_reminder_inflight,
+    reminder_is_due,
+    reminder_message,
 )
 from avito_bot.service_centers import parse_service_center_overrides
 from avito_bot.storage import SQLiteStateStore
 from avito_bot.warehouse_sheet import (
     DEFAULT_SHEET_GID as DEFAULT_WAREHOUSE_LOCATIONS_SHEET_GID,
+)
+from avito_bot.warehouse_sheet import (
     DEFAULT_SHEET_ID as DEFAULT_WAREHOUSE_LOCATIONS_SHEET_ID,
+)
+from avito_bot.warehouse_sheet import (
     GoogleSheetWarehouseSource,
     RefreshingWarehouseProvider,
 )
@@ -72,6 +99,7 @@ def iter_new_chat_messages(
     *,
     not_before_timestamp: float | None = None,
     manual_takeover_after: float | None = None,
+    reminder_manual_stop_after: float | None = None,
 ) -> Iterator[tuple[str, ConversationState, dict[str, Any], str, str | None, str | None]]:
     for chat in chats:
         chat_id = str(chat.get("id") or "").strip()
@@ -183,13 +211,17 @@ def iter_new_chat_messages(
                 continue
             if message.get("direction") != "in":
                 created = normalized_created(message)
-                if (
-                    manual_takeover_after is not None
-                    and message.get("type") == "text"
+                is_new_manual_outgoing = (
+                    message.get("type") == "text"
                     and created is not None
-                    and created >= manual_takeover_after
                     and not store.is_bot_outgoing(chat_id, message_id)
+                )
+                if (
+                    is_new_manual_outgoing
+                    and manual_takeover_after is not None
+                    and created >= manual_takeover_after
                 ):
+                    stop_reminders(state, permanently=True)
                     state.step = "manual_takeover"
                     state.application_status = "manual"
                     state.last_error = None
@@ -200,6 +232,17 @@ def iter_new_chat_messages(
                     print(
                         f"manual takeover chat_id={chat_id} "
                         f"message_id={message_id}; bot paused"
+                    )
+                elif (
+                    is_new_manual_outgoing
+                    and reminder_manual_stop_after is not None
+                    and created >= reminder_manual_stop_after
+                ):
+                    stop_reminders(state, permanently=True)
+                    store.save(chat_id, state)
+                    print(
+                        f"manual outgoing stopped reminders chat_id={chat_id} "
+                        f"message_id={message_id}"
                     )
                 store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
@@ -325,6 +368,167 @@ def send_bot_message(
     if message_id:
         store.mark_bot_outgoing(chat_id, message_id)
     return response
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content") or {}
+    value = content.get("text") if isinstance(content, dict) else None
+    return value if isinstance(value, str) else ""
+
+
+def _message_datetime(message: dict[str, Any]) -> datetime | None:
+    created = normalized_created(message)
+    if created is None:
+        return None
+    try:
+        return datetime.fromtimestamp(created, timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _find_delivered_inflight_reminder(
+    messages: list[dict[str, Any]], state: ConversationState
+) -> tuple[str | None, datetime] | None:
+    if not state.reminder_inflight_text or not state.reminder_inflight_started_at:
+        return None
+    try:
+        started_at = datetime.fromisoformat(state.reminder_inflight_started_at)
+        if started_at.tzinfo is None:
+            return None
+    except ValueError:
+        return None
+    earliest = started_at - timedelta(seconds=5)
+    for message in reversed(oldest_first(messages)):
+        if message.get("direction") != "out" or message.get("type") != "text":
+            continue
+        created_at = _message_datetime(message)
+        if created_at is None or created_at < earliest:
+            continue
+        if _message_text(message) != state.reminder_inflight_text:
+            continue
+        message_id = str(message.get("id") or "").strip() or None
+        return message_id, created_at
+    return None
+
+
+def _activity_after_reminder_arm(
+    messages: list[dict[str, Any]],
+    store: SQLiteStateStore,
+    chat_id: str,
+    state: ConversationState,
+) -> str | None:
+    if not state.reminder_armed_at:
+        return None
+    try:
+        armed_at = datetime.fromisoformat(state.reminder_armed_at)
+        if armed_at.tzinfo is None:
+            return "unknown"
+    except ValueError:
+        return "unknown"
+    for message in oldest_first(messages):
+        created_at = _message_datetime(message)
+        if created_at is None or created_at < armed_at:
+            continue
+        message_id = str(message.get("id") or "").strip()
+        direction = message.get("direction")
+        if direction == "in" and message.get("type") != "system":
+            # A response that advanced the conversation before this reminder
+            # series was armed is not new activity, even when the Avito and VPS
+            # clocks differ by a few seconds.
+            if message_id and store.is_processed(chat_id, message_id):
+                continue
+            return "candidate"
+        if direction != "out" or message.get("type") == "system":
+            continue
+        if message_id and store.is_bot_outgoing(chat_id, message_id):
+            continue
+        if (
+            state.reminder_inflight_text
+            and _message_text(message) == state.reminder_inflight_text
+        ):
+            continue
+        return "manual"
+    return None
+
+
+def process_due_reminders(
+    client: AvitoClient,
+    store: SQLiteStateStore,
+    config: ReminderConfig,
+    *,
+    now: datetime | None = None,
+) -> int:
+    if not config.enabled:
+        return 0
+    current = now or datetime.now(timezone.utc)
+    sent = 0
+    for chat_id, state in store.all_conversations():
+        if not state.reminder_inflight_number and not reminder_is_due(
+            state, now=current
+        ):
+            continue
+        try:
+            messages = client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT)
+        except Exception as exc:  # noqa: BLE001 - isolate one chat/API failure
+            print(f"reminder verification error chat_id={chat_id}: {exc}")
+            continue
+
+        if state.reminder_inflight_number:
+            delivered = _find_delivered_inflight_reminder(messages, state)
+            if delivered is not None:
+                message_id, delivered_at = delivered
+                if message_id:
+                    store.mark_bot_outgoing(chat_id, message_id)
+                finish_reminder(state, config, sent_at=delivered_at)
+                store.save(chat_id, state)
+                print(
+                    f"reminder delivery reconciled chat_id={chat_id} "
+                    f"sent_count={state.reminder_count}"
+                )
+                continue
+
+        activity = _activity_after_reminder_arm(messages, store, chat_id, state)
+        if activity == "candidate":
+            stop_reminders(state)
+            store.save(chat_id, state)
+            print(f"reminders cancelled after candidate activity chat_id={chat_id}")
+            continue
+        if activity in {"manual", "unknown"}:
+            stop_reminders(state, permanently=True)
+            store.save(chat_id, state)
+            print(f"reminders stopped after manual activity chat_id={chat_id}")
+            continue
+
+        if state.reminder_inflight_number:
+            if not inflight_retry_is_due(state, config, now=current):
+                continue
+            clear_inflight_for_retry(state)
+            store.save(chat_id, state)
+
+        if not reminder_is_due(state, now=current):
+            continue
+        try:
+            text = reminder_message(state)
+        except ValueError as exc:
+            stop_reminders(state, permanently=True)
+            store.save(chat_id, state)
+            print(f"reminder configuration error chat_id={chat_id}: {exc}")
+            continue
+        try:
+            mark_reminder_inflight(state, text, now=current)
+            store.save(chat_id, state)
+            send_bot_message(client, store, chat_id, text)
+        except Exception as exc:  # noqa: BLE001 - preserve inflight state for retry
+            print(f"reminder send error chat_id={chat_id}: {exc}")
+            continue
+        finish_reminder(state, config, sent_at=current)
+        store.save(chat_id, state)
+        sent += 1
+        print(
+            f"reminder sent chat_id={chat_id} sent_count={state.reminder_count} "
+            f"step={state.step}"
+        )
+    return sent
 
 
 def oldest_first(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -517,6 +721,9 @@ def initialize_message_cursor(
                 state.step = inferred_step
                 if inferred_step == "done":
                     state.application_status = "completed"
+                elif inferred_step == "manual_takeover":
+                    stop_reminders(state, permanently=True)
+                    state.application_status = "manual"
                 state.city = city or state.city
                 state.item_id = item_id or state.item_id
                 store.save(chat_id, state)
@@ -539,6 +746,8 @@ def infer_step_from_bot_message(text: str | None) -> str | None:
         return "sending_intro"
     if normalized.startswith("Подобрали для вас склады"):
         return "awaiting_warehouse"
+    if "❗️Подобрали для вас склады" in normalized:
+        return "awaiting_warehouse"
     if (
         normalized.startswith("Стажировка каждый день в ")
         and "на какой день вас записать?" in normalized
@@ -546,6 +755,12 @@ def infer_step_from_bot_message(text: str | None) -> str | None:
         return "awaiting_datetime"
     if normalized == CONFIRMATION_MESSAGE.strip():
         return "awaiting_full_name"
+    if normalized == DATE_REMINDER_MESSAGE.strip():
+        return "awaiting_datetime"
+    if normalized == MORE_INFO_MESSAGE.strip():
+        return "awaiting_call"
+    if normalized == CALL_HANDOFF_MESSAGE.strip():
+        return "manual_takeover"
     if normalized == "И номер":
         return "awaiting_phone"
     if normalized.startswith("Готово, вы записаны!"):
@@ -700,6 +915,7 @@ def send_initial_sequence(
     chat_id: str,
     state: ConversationState,
     message_id: str,
+    reminder_config: ReminderConfig | None = None,
 ) -> bool:
     messages = initial_messages_for_city(state.city)
     if not messages:
@@ -721,6 +937,7 @@ def send_initial_sequence(
         store.save(chat_id, state)
 
     state.step = "awaiting_warehouse"
+    arm_reminders(state, reminder_config or ReminderConfig())
     store.save(chat_id, state)
     return True
 
@@ -738,7 +955,9 @@ def process_chat_message(
     *,
     regional_locations: RegionalLocationCatalog | None = None,
     regional_overrides: dict[str, str] | None = None,
+    reminder_config: ReminderConfig | None = None,
 ) -> None:
+    configured_reminders = reminder_config or ReminderConfig()
     content = message.get("content") or {}
     text = content.get("text", "")
     state.city = city or state.city
@@ -757,6 +976,7 @@ def process_chat_message(
             message_id,
             regional_locations,
             regional_overrides,
+            configured_reminders,
         )
         store.mark_message_seen(chat_id, message_id, normalized_created(message))
         print(
@@ -776,6 +996,7 @@ def process_chat_message(
             chat_id,
             state,
             message_id,
+            configured_reminders,
         )
         store.mark_message_seen(chat_id, message_id, normalized_created(message))
         state.intro_trigger_message_id = None
@@ -795,9 +1016,14 @@ def process_chat_message(
         state.intro_trigger_message_id = None
         store.save(chat_id, state)
         return
+    stop_reminders(state)
+    # Persist cancellation before parsing or replying. Even if processing the
+    # candidate response fails, an already-due reminder must not race it.
+    store.save(chat_id, state)
     reply = handle_user_message(state, text, city_hint=state.city)
     if reply:
         send_bot_message(client, store, chat_id, reply)
+        arm_reminders(state, configured_reminders)
 
     store.save(chat_id, state)
     store.mark_message_seen(chat_id, message_id, normalized_created(message))
@@ -826,6 +1052,7 @@ def send_regional_initial_sequence(
     message_id: str,
     catalog: RegionalLocationCatalog,
     overrides: dict[str, str] | None = None,
+    reminder_config: ReminderConfig | None = None,
 ) -> None:
     location = catalog.resolve(state.city, state.item_id, overrides)
     if state.regional_intro_trigger_message_id != message_id:
@@ -847,6 +1074,7 @@ def send_regional_initial_sequence(
 
     state.step = "awaiting_datetime"
     state.regional_intro_trigger_message_id = None
+    arm_reminders(state, reminder_config or ReminderConfig())
     store.save(chat_id, state)
 
 
@@ -868,6 +1096,7 @@ def main() -> None:
     )
     state_path = os.getenv("STATE_DB_PATH", str(Path(PROJECT_ROOT) / "data" / "bot.sqlite3"))
     store = SQLiteStateStore(state_path)
+    reminder_config = ReminderConfig.from_env()
     manual_takeover_after = None
     if os.getenv("PAUSE_ON_MANUAL_OUTGOING", "false").strip().lower() == "true":
         manual_takeover_key = "manual_takeover_started_at_v1"
@@ -889,6 +1118,27 @@ def main() -> None:
                     str(manual_takeover_after),
                 )
         print("Manual takeover detection enabled")
+    reminder_manual_stop_after = None
+    if reminder_config.enabled:
+        reminder_boundary_key = "reminder_manual_stop_started_at_v1"
+        configured_boundary = store.get_metadata(reminder_boundary_key)
+        if configured_boundary is None:
+            reminder_manual_stop_after = datetime.now(timezone.utc).timestamp()
+            store.set_metadata(
+                reminder_boundary_key, str(reminder_manual_stop_after)
+            )
+        else:
+            try:
+                reminder_manual_stop_after = float(configured_boundary)
+            except ValueError:
+                reminder_manual_stop_after = datetime.now(timezone.utc).timestamp()
+                store.set_metadata(
+                    reminder_boundary_key, str(reminder_manual_stop_after)
+                )
+        print(
+            "Follow-up reminders enabled with sequential delays="
+            f"{reminder_config.delays_seconds}s"
+        )
     interrupted = store.quarantine_interrupted_submissions()
     if interrupted:
         print(
@@ -1068,6 +1318,7 @@ def main() -> None:
                             *values,
                             regional_locations=regional_locations,
                             regional_overrides=regional_overrides,
+                            reminder_config=reminder_config,
                         )
                         recovered_unanswered += 1
                     except Exception as exc:
@@ -1099,6 +1350,7 @@ def main() -> None:
                 store,
                 not_before_timestamp=recovery_cutoff,
                 manual_takeover_after=manual_takeover_after,
+                reminder_manual_stop_after=reminder_manual_stop_after,
             ):
                 if values[0] in failed_chats:
                     continue
@@ -1110,11 +1362,18 @@ def main() -> None:
                         *values,
                         regional_locations=regional_locations,
                         regional_overrides=regional_overrides,
+                        reminder_config=reminder_config,
                     )
                     processed_since_health += 1
                 except Exception as exc:
                     failed_chats.add(values[0])
                     print(f"message error chat_id={values[0]}: {exc}")
+
+            processed_since_health += process_due_reminders(
+                client,
+                store,
+                reminder_config,
+            )
 
             for chat_id, state in store.pending():
                 complete_pending_application(

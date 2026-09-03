@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+import weakref
 from dataclasses import asdict, fields
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .conversation import ConversationState
@@ -16,6 +17,7 @@ class SQLiteStateStore:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        self._connection_finalizer = weakref.finalize(self, self._connection.close)
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute(
             """
@@ -75,7 +77,9 @@ class SQLiteStateStore:
             return ConversationState()
         payload = json.loads(row[0])
         allowed = {item.name for item in fields(ConversationState)}
-        return ConversationState(**{key: value for key, value in payload.items() if key in allowed})
+        return ConversationState(
+            **{key: value for key, value in payload.items() if key in allowed}
+        )
 
     def save(self, chat_id: str, state: ConversationState) -> None:
         payload = json.dumps(asdict(state), ensure_ascii=False)
@@ -201,7 +205,9 @@ class SQLiteStateStore:
         for chat_id, raw in rows:
             payload = json.loads(raw)
             retry_at = payload.get("next_retry_at")
-            retry_due = not retry_at or datetime.fromisoformat(retry_at) <= datetime.now(timezone.utc)
+            retry_due = not retry_at or datetime.fromisoformat(
+                retry_at
+            ) <= datetime.now(timezone.utc)
             if payload.get("application_status") in pending_statuses and retry_due:
                 allowed = {item.name for item in fields(ConversationState)}
                 state = ConversationState(
@@ -280,4 +286,4 @@ class SQLiteStateStore:
 
     def close(self) -> None:
         with self._lock:
-            self._connection.close()
+            self._connection_finalizer()

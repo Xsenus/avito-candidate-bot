@@ -36,6 +36,14 @@ class ConversationState:
     address: str | None = None
     manual_takeover_at: str | None = None
     manual_takeover_message_id: str | None = None
+    reminder_step: str | None = None
+    reminder_count: int = 0
+    reminder_due_at: str | None = None
+    reminder_armed_at: str | None = None
+    reminder_inflight_number: int | None = None
+    reminder_inflight_started_at: str | None = None
+    reminder_inflight_text: str | None = None
+    reminders_stopped: bool = False
     date_time: str | None = None
     internship_date: str | None = None
     tariff: str = "Драйв"
@@ -144,6 +152,26 @@ CONFIRMATION_MESSAGE = (
     "Для пропуска пришлите Фамилию Имя, без пропуска вы не сможете попасть на склад. Напишите это сейчас"
 )
 
+REMINDER_LEAD = (
+    "Напоминаю — вакансия ещё актуальна.\n"
+    'Напишите "Звонок" если вы хотите обсудить вакансию с отделом кадров.'
+)
+
+DATE_REMINDER_MESSAGE = (
+    f"{REMINDER_LEAD}\n\n"
+    "❗️Выберите дату, чтобы зафиксировать запись и внести вас в списки на "
+    "стажировку. Если вы желаете выбрать другую дату напишите нужную дату в "
+    'формате "ДД.ММ"\n\n'
+    'или "0" если не актуально.'
+)
+
+MORE_INFO_MESSAGE = (
+    "Если вам не хватило информации с вами свяжется отдел кадров и подробно "
+    'рассказать детали вакансии, просто напишите слово "Звонок"'
+)
+
+CALL_HANDOFF_MESSAGE = "Наш отдел кадров свяжется с вами в ближайшее время."
+
 
 def initial_messages_for_city(city: str | None) -> tuple[str, ...]:
     warehouse_prompt = warehouse_prompt_for_city(city)
@@ -179,6 +207,16 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
     if state.step == "unsupported":
         return ""
 
+    if is_call_request(cleaned):
+        stop_reminders(state, permanently=True)
+        state.step = "manual_takeover"
+        state.application_status = "manual"
+        return CALL_HANDOFF_MESSAGE
+
+    if state.step == "awaiting_call":
+        stop_reminders(state, permanently=True)
+        return MORE_INFO_MESSAGE
+
     if state.step == "idle":
         state.city = normalize_city(city_hint) or state.city
         if not initial_messages_for_city(state.city):
@@ -204,17 +242,15 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
 
     if state.step == "awaiting_warehouse":
         state.city = normalize_city(city_hint) or state.city
-        prompt = warehouse_prompt_for_city(state.city)
         choice = parse_warehouse_choice(text, state.city)
         if choice == 0:
-            state.step = "done"
-            state.application_status = "cancelled"
-            return "Понял, заявку отменил. Если планы изменятся — напишите нам."
+            stop_reminders(state, permanently=True)
+            state.step = "awaiting_call"
+            return MORE_INFO_MESSAGE
         if choice is None:
-            return (
-                "Не удалось определить склад. Укажите номер из списка.\n\n"
-                f"{prompt or ''}"
-            ).strip()
+            stop_reminders(state, permanently=True)
+            state.step = "awaiting_call"
+            return MORE_INFO_MESSAGE
         state.warehouse_choice = choice.number
         state.warehouse_selection_source = "candidate"
         state.service_center = choice.service_center
@@ -247,8 +283,10 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
     if state.step == "awaiting_datetime":
         try:
             state.internship_date = resolve_internship_date(text).strftime("%d.%m.%Y")
-        except ValueError as exc:
-            return str(exc)
+        except ValueError:
+            stop_reminders(state, permanently=True)
+            state.step = "awaiting_call"
+            return MORE_INFO_MESSAGE
         state.date_time = text.strip()
         state.step = "awaiting_full_name"
         return CONFIRMATION_MESSAGE
@@ -280,6 +318,24 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
         return ""
 
     return ""
+
+
+def is_call_request(text: str) -> bool:
+    normalized = re.sub(r"[^a-zа-я0-9]+", " ", (text or "").casefold())
+    return "звонок" in normalized.split()
+
+
+def stop_reminders(
+    state: ConversationState, *, permanently: bool = False
+) -> None:
+    state.reminder_step = None
+    state.reminder_due_at = None
+    state.reminder_armed_at = None
+    state.reminder_inflight_number = None
+    state.reminder_inflight_started_at = None
+    state.reminder_inflight_text = None
+    if permanently:
+        state.reminders_stopped = True
 
 
 def handle_webhook_event(client: AvitoClient, state: ConversationState, payload: dict[str, Any]) -> dict[str, Any]:
