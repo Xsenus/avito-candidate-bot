@@ -204,5 +204,33 @@ systemctl restart avito-bot
 ## Тесты
 
 ```bash
-python -m pytest -q
+python -m pip install -r requirements-dev.txt
+python -m pytest -q tests
 ```
+
+Unit-тесты изолированы от рабочего окружения: ещё до импорта модулей
+отключается загрузка `.env`, очищаются настройки бота, блокируются DNS,
+TCP/UDP-отправка и запуск дочерних процессов (включая браузер). Базы SQLite
+и CSV-кэши направляются в отдельную временную папку каждого теста. Сетевые
+клиенты заменяются явными fake-объектами. Это защита от случайных побочных
+эффектов, а не песочница для недоверенного кода.
+
+Workflow `.github/workflows/tests.yml` запускает тесты на push, pull request
+и вручную: Python 3.11/3.12/3.13, Ubuntu/Windows. Он не получает production secrets,
+не устанавливает браузеры, не запускает `preflight.py`, не отправляет формы
+или сообщения и не выполняет deploy. JUnit-отчёты хранятся 7 дней. Установка
+зависимостей требует сети; сами unit-тесты выполняются с блокировкой I/O.
+Runtime-зависимости пока сохраняют диапазоны из `requirements.txt` — это
+не полный lockfile. Успех unit CI не заменяет отдельную согласованную
+интеграционную проверку Avito/Яндекс Формы.
+
+Если Windows запрещает доступ к общей папке `pytest-of-*`, можно задать
+новую уникальную папку для одного запуска (PowerShell):
+
+```powershell
+$testTemp = Join-Path (Get-Location) ('.pytest-run-' + [guid]::NewGuid().ToString('N'))
+python -m pytest -q tests --basetemp $testTemp
+```
+
+Не указывайте в `--basetemp` существующую папку с нужными данными: pytest
+может очистить её. Префикс `.pytest-run-` уже исключён из Git.
