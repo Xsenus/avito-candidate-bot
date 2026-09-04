@@ -9,7 +9,7 @@ from avito_bot.avito_client import AvitoClient
 from avito_bot.conversation import ConversationState
 from avito_bot.invitations import GoogleSheetInvitationSource
 from avito_bot.regional_locations import GoogleSheetRegionalLocationSource
-from avito_bot.reminders import ReminderConfig, reminder_message
+from avito_bot.reminders import ReminderConfig, reactivation_message, reminder_message
 from avito_bot.service_centers import (
     ServiceCenterSelection,
     form_option_for,
@@ -53,9 +53,11 @@ def main() -> None:
             reminder_message(
                 ConversationState(step="awaiting_warehouse", city=city)
             )
+        for city in ("Москва", "Санкт-Петербург", "Тула"):
+            assert len(reactivation_message(ConversationState(city=city))) <= 1000
         print(
             "Follow-up reminders: OK "
-            f"(sequential delays={reminder_config.delays_seconds}s)"
+            f"(question-relative offsets={reminder_config.all_offsets}s)"
         )
 
 

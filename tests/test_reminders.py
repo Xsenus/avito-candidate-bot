@@ -68,7 +68,7 @@ def config(*delays, grace=60):
     )
 
 
-def test_default_config_uses_three_sequential_production_delays(monkeypatch):
+def test_default_config_uses_question_relative_production_offsets(monkeypatch):
     for name in (
         "FOLLOW_UP_REMINDERS_ENABLED",
         "FOLLOW_UP_FIRST_DELAY_SECONDS",
@@ -80,7 +80,7 @@ def test_default_config_uses_three_sequential_production_delays(monkeypatch):
     value = ReminderConfig.from_env()
 
     assert not value.enabled
-    assert value.delays_seconds == (15 * 60, 60 * 60, 24 * 60 * 60)
+    assert value.delays_seconds == (5 * 60, 12 * 60 * 60, 24 * 60 * 60)
 
 
 def test_test_delays_are_configurable_without_code_changes(monkeypatch):
@@ -98,7 +98,7 @@ def test_test_delays_are_configurable_without_code_changes(monkeypatch):
 def test_date_reminder_exactly_matches_customer_text():
     expected = (
         "Напоминаю — вакансия ещё актуальна.\n"
-        'Напишите "Звонок" если вы хотите обсудить вакансию с отделом кадров.\n\n'
+        'Напишите "Оператор" если вы хотите обсудить вакансию с отделом кадров тут в чате.\n\n'
         "❗️Выберите дату, чтобы зафиксировать запись и внести вас в списки "
         "на стажировку. Если вы желаете выбрать другую дату напишите нужную "
         'дату в формате "ДД.ММ"\n\n'
@@ -136,7 +136,7 @@ def test_warehouse_reminder_uses_current_dynamic_table_values():
     assert len(text) <= 1000
 
 
-def test_schedule_is_sequential_and_finishes_after_third_reminder():
+def test_schedule_is_question_relative_and_finishes_after_third_reminder():
     started = datetime(2026, 9, 3, 5, 0, tzinfo=UTC)
     state = ConversationState(step="awaiting_datetime")
     settings = config(900, 3600, 86400)
@@ -151,15 +151,15 @@ def test_schedule_is_sequential_and_finishes_after_third_reminder():
     mark_reminder_inflight(state, DATE_REMINDER_MESSAGE, now=first)
     finish_reminder(state, settings, sent_at=first)
     assert state.reminder_count == 1
-    assert state.reminder_due_at == (first + timedelta(hours=1)).isoformat()
+    assert state.reminder_due_at == (started + timedelta(hours=1)).isoformat()
 
-    second = first + timedelta(hours=1)
+    second = started + timedelta(hours=1)
     mark_reminder_inflight(state, DATE_REMINDER_MESSAGE, now=second)
     finish_reminder(state, settings, sent_at=second)
     assert state.reminder_count == 2
-    assert state.reminder_due_at == (second + timedelta(hours=24)).isoformat()
+    assert state.reminder_due_at == (started + timedelta(hours=24)).isoformat()
 
-    third = second + timedelta(hours=24)
+    third = started + timedelta(hours=24)
     mark_reminder_inflight(state, DATE_REMINDER_MESSAGE, now=third)
     finish_reminder(state, settings, sent_at=third)
     assert state.reminder_count == 3
@@ -196,7 +196,7 @@ def test_disabled_or_permanently_stopped_reminders_are_not_armed():
         ConversationState(
             step="awaiting_datetime",
             reminder_step="awaiting_datetime",
-            reminder_count=3,
+            reminder_count=4,
             reminder_due_at="2026-09-03T00:00:00+00:00",
         ),
     ],
@@ -277,11 +277,11 @@ def test_reminder_schedule_survives_database_reopen(tmp_path):
     assert not restored.reminders_stopped
 
 
-def test_due_processor_sends_all_three_reminders_in_sequence(tmp_path):
+def test_due_processor_sends_first_three_and_schedules_fourth(tmp_path):
     settings = config(900, 3600, 86400)
     started = datetime(2026, 9, 3, 5, 0, tzinfo=UTC)
     store = SQLiteStateStore(tmp_path / "sequence.sqlite3")
-    state = ConversationState(step="awaiting_datetime")
+    state = ConversationState(step="awaiting_datetime", city="Тула")
     arm_reminders(state, settings, now=started)
     store.save("chat-1", state)
     client = ReminderClient(started)
@@ -291,18 +291,21 @@ def test_due_processor_sends_all_three_reminders_in_sequence(tmp_path):
     assert process_due_reminders(client, store, settings, now=first) == 1
     assert store.load("chat-1").reminder_count == 1
 
-    second = first + timedelta(hours=1)
+    second = started + timedelta(hours=1)
     client.now = second
     assert process_due_reminders(client, store, settings, now=second) == 1
     assert store.load("chat-1").reminder_count == 2
 
-    third = second + timedelta(hours=24)
+    third = started + timedelta(hours=24)
     client.now = third
     assert process_due_reminders(client, store, settings, now=third) == 1
     restored = store.load("chat-1")
     assert restored.reminder_count == 3
-    assert restored.reminder_due_at is None
-    assert [text for _, text in client.sent] == [DATE_REMINDER_MESSAGE] * 3
+    assert restored.reminder_due_at == (started + timedelta(hours=48)).isoformat()
+    from avito_bot.reminders import reactivation_message
+    assert [text for _, text in client.sent] == [DATE_REMINDER_MESSAGE] * 2 + [reactivation_message(state)]
+    assert restored.step == "awaiting_reactivation"
+    assert restored.reactivation_sent
     store.close()
 
 

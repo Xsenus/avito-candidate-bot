@@ -44,6 +44,13 @@ class ConversationState:
     reminder_inflight_started_at: str | None = None
     reminder_inflight_text: str | None = None
     reminders_stopped: bool = False
+    reminder_policy_version: int = 0
+    reactivation_sent: bool = False
+    reactivation_reply_messages: list[str] = field(default_factory=list)
+    reactivation_reply_index: int = 0
+    reactivation_reply_trigger_id: str | None = None
+    reactivation_reply_inflight_at: str | None = None
+    reactivation_reply_started_at: str | None = None
     date_time: str | None = None
     internship_date: str | None = None
     tariff: str = "Драйв"
@@ -154,7 +161,7 @@ CONFIRMATION_MESSAGE = (
 
 REMINDER_LEAD = (
     "Напоминаю — вакансия ещё актуальна.\n"
-    'Напишите "Звонок" если вы хотите обсудить вакансию с отделом кадров.'
+    'Напишите "Оператор" если вы хотите обсудить вакансию с отделом кадров тут в чате.'
 )
 
 DATE_REMINDER_MESSAGE = (
@@ -167,10 +174,27 @@ DATE_REMINDER_MESSAGE = (
 
 MORE_INFO_MESSAGE = (
     "Если вам не хватило информации с вами свяжется отдел кадров и подробно "
-    'рассказать детали вакансии, просто напишите слово "Звонок"'
+    'рассказать детали вакансии, просто напишите слово "Оператор" и напишите свой вопрос в чат.'
 )
 
-CALL_HANDOFF_MESSAGE = "Наш отдел кадров свяжется с вами в ближайшее время."
+LEGACY_CALL_HANDOFF_MESSAGE = "Наш отдел кадров свяжется с вами в ближайшее время."
+LEGACY_MORE_INFO_MESSAGE = (
+    "Если вам не хватило информации с вами свяжется отдел кадров и подробно "
+    'рассказать детали вакансии, просто напишите слово "Звонок"'
+)
+LEGACY_DATE_REMINDER_MESSAGE = DATE_REMINDER_MESSAGE.replace(
+    '"Оператор"', '"Звонок"'
+).replace(" тут в чате.", ".")
+CALL_HANDOFF_MESSAGE = (
+    "Наш отдел кадров свяжется с вами в ближайшее время. "
+    "Пожалуйста, напишите свои вопросы прямо здесь, в чате. "
+    "Мы обязательно ответим на все ваши вопросы в ближайшее время."
+)
+
+
+def is_reactivation_acceptance(text: str) -> bool:
+    normalized = re.sub(r"[^a-zа-яё0-9]+", " ", (text or "").casefold()).strip()
+    return normalized in {"да", "da", "согласен"}
 
 
 def initial_messages_for_city(city: str | None) -> tuple[str, ...]:
@@ -207,6 +231,11 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
     if state.step == "unsupported":
         return ""
 
+    if state.application_status in {"completed", "manual", "cancelled"} or state.step in {
+        "done", "manual_takeover"
+    }:
+        return ""
+
     if is_call_request(cleaned):
         stop_reminders(state, permanently=True)
         state.step = "manual_takeover"
@@ -215,6 +244,14 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
 
     if state.step == "awaiting_call":
         stop_reminders(state, permanently=True)
+        return MORE_INFO_MESSAGE
+
+    if state.step == "awaiting_reactivation":
+        if is_reactivation_acceptance(cleaned):
+            state.step = "sending_reactivation_intro"
+            return ""
+        stop_reminders(state, permanently=True)
+        state.step = "awaiting_call"
         return MORE_INFO_MESSAGE
 
     if state.step == "idle":
@@ -322,7 +359,7 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
 
 def is_call_request(text: str) -> bool:
     normalized = re.sub(r"[^a-zа-я0-9]+", " ", (text or "").casefold())
-    return "звонок" in normalized.split()
+    return bool({"звонок", "оператор"} & set(normalized.split()))
 
 
 def stop_reminders(

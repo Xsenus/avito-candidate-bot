@@ -27,10 +27,15 @@ from avito_bot.conversation import (
     DATE_REMINDER_MESSAGE,
     FOLLOW_UP_MESSAGE,
     INITIAL_MESSAGE,
+    LEGACY_CALL_HANDOFF_MESSAGE,
+    LEGACY_DATE_REMINDER_MESSAGE,
+    LEGACY_MORE_INFO_MESSAGE,
     MORE_INFO_MESSAGE,
     ConversationState,
     handle_user_message,
     initial_messages_for_city,
+    is_call_request,
+    is_reactivation_acceptance,
     stop_reminders,
 )
 from avito_bot.regional_locations import (
@@ -71,6 +76,7 @@ from avito_bot.warehouses import (
     WAREHOUSE_GROUPS,
     replace_warehouse_groups,
     warehouse_group_for_city,
+    warehouse_prompt_for_city,
 )
 from avito_bot.workflow import CandidateWorkflow, mark_invitation_sent
 from avito_bot.yandex_form import FormConfigurationError, YandexFormSubmitter
@@ -203,7 +209,11 @@ def iter_new_chat_messages(
             if key is None and message_id != last_message_id:
                 store.mark_message_seen(chat_id, message_id, None)
                 continue
-            if key is not None and cursor is not None and key <= cursor:
+            # IDs are opaque, not a chronological sequence. A newly received
+            # message can sort below the cursor ID within the same second.
+            # Exact replay protection is provided by is_processed above;
+            # only strictly older timestamps belong behind the watermark.
+            if key is not None and cursor is not None and key[0] < cursor[0]:
                 store.mark_message_seen(chat_id, message_id, key[0] if key else None)
                 continue
             if terminal:
@@ -211,6 +221,16 @@ def iter_new_chat_messages(
                 continue
             if message.get("direction") != "in":
                 created = normalized_created(message)
+                # Reconcile a POST with a lost response before mistaking its
+                # outgoing message for a human operator taking over the chat.
+                probe = state
+                if state.reactivation_reply_inflight_at and state.reactivation_reply_index < len(state.reactivation_reply_messages):
+                    probe = ConversationState(
+                        reminder_inflight_started_at=state.reactivation_reply_inflight_at,
+                        reminder_inflight_text=state.reactivation_reply_messages[state.reactivation_reply_index],
+                    )
+                if _find_delivered_inflight_reminder([message], probe):
+                    store.mark_bot_outgoing(chat_id, message_id)
                 is_new_manual_outgoing = (
                     message.get("type") == "text"
                     and created is not None
@@ -425,6 +445,11 @@ def _activity_after_reminder_arm(
             return "unknown"
     except ValueError:
         return "unknown"
+    # Avito timestamps have second precision. Include the whole boundary
+    # second; processed incoming and registered bot outgoing IDs below exclude
+    # activity already handled before this question was armed.
+    armed_at = armed_at.replace(microsecond=0)
+    candidate_activity = False
     for message in oldest_first(messages):
         created_at = _message_datetime(message)
         if created_at is None or created_at < armed_at:
@@ -437,7 +462,8 @@ def _activity_after_reminder_arm(
             # clocks differ by a few seconds.
             if message_id and store.is_processed(chat_id, message_id):
                 continue
-            return "candidate"
+            candidate_activity = True
+            continue
         if direction != "out" or message.get("type") == "system":
             continue
         if message_id and store.is_bot_outgoing(chat_id, message_id):
@@ -448,7 +474,7 @@ def _activity_after_reminder_arm(
         ):
             continue
         return "manual"
-    return None
+    return "candidate" if candidate_activity else None
 
 
 def process_due_reminders(
@@ -461,8 +487,13 @@ def process_due_reminders(
     if not config.enabled:
         return 0
     current = now or datetime.now(timezone.utc)
+    migrate_waiting_reminders(client, store, config, now=current)
     sent = 0
     for chat_id, state in store.all_conversations():
+        if state.reminders_stopped or state.application_status != "collecting" or state.step not in {
+            "awaiting_warehouse", "awaiting_datetime", "awaiting_reactivation"
+        }:
+            continue
         if not state.reminder_inflight_number and not reminder_is_due(
             state, now=current
         ):
@@ -507,6 +538,17 @@ def process_due_reminders(
 
         if not reminder_is_due(state, now=current):
             continue
+        # Missed deadlines do not result in a burst after downtime.
+        if state.reminder_armed_at:
+            anchor = datetime.fromisoformat(state.reminder_armed_at)
+            offsets = (
+                config.delays_seconds[:2]
+                if state.reactivation_sent and state.step != "awaiting_reactivation"
+                else config.all_offsets
+            )
+            for index, offset in enumerate(offsets):
+                if current >= anchor + timedelta(seconds=offset):
+                    state.reminder_count = max(state.reminder_count, index)
         try:
             text = reminder_message(state)
         except ValueError as exc:
@@ -517,7 +559,11 @@ def process_due_reminders(
         try:
             mark_reminder_inflight(state, text, now=current)
             store.save(chat_id, state)
-            send_bot_message(client, store, chat_id, text)
+            response = send_bot_message(client, store, chat_id, text)
+            if not sent_message_id(response):
+                # A success without an id still requires history confirmation.
+                # Keep the outbox intact so the outgoing cannot look manual.
+                continue
         except Exception as exc:  # noqa: BLE001 - preserve inflight state for retry
             print(f"reminder send error chat_id={chat_id}: {exc}")
             continue
@@ -529,6 +575,81 @@ def process_due_reminders(
             f"step={state.step}"
         )
     return sent
+
+
+def migrate_waiting_reminders(
+    client: AvitoClient, store: SQLiteStateStore, config: ReminderConfig,
+    *, now: datetime, batch_size: int = 20,
+) -> int:
+    """Migrate verified unanswered bot questions; never revive manual/history chats.
+
+    A bounded batch protects normal polling. Errors are retried later and do not
+    turn uncertain history into permission to send a message.
+    """
+    if not config.enabled:
+        return 0
+    migrated = checked = 0
+    for chat_id, state in store.all_conversations():
+        if state.reminder_policy_version >= 2 or state.reminder_inflight_number:
+            continue
+        if state.reminders_stopped or state.application_status != "collecting" or state.step not in {
+            "awaiting_warehouse", "awaiting_datetime"
+        } or state.last_error or state.manual_takeover_at or state.notes.get("preinstallation_chat_quarantined"):
+            continue
+        retry_at = state.notes.get("reminder_migration_retry_at")
+        if retry_at and retry_at > now.isoformat():
+            continue
+        if checked >= batch_size:
+            break
+        checked += 1
+        try:
+            messages = oldest_first(client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT))
+        except Exception:  # noqa: BLE001 - retry history lookup without authorizing sends
+            state.notes["reminder_migration_retry_at"] = (now + timedelta(minutes=5)).isoformat()
+            store.save(chat_id, state)
+            continue
+        prompt = next((m for m in reversed(messages) if (
+            m.get("direction") == "out"
+            and not _message_text(m).startswith("Напоминаю")
+            and infer_step_from_bot_message(_message_text(m)) == state.step
+            and store.is_bot_outgoing(chat_id, str(m.get("id") or ""))
+        )), None)
+        anchor = _message_datetime(prompt) if prompt else None
+        state.reminder_policy_version = 2
+        state.notes.pop("reminder_migration_retry_at", None)
+        if anchor is None:
+            stop_reminders(state)
+            state.notes["reminder_migration"] = "no_verified_question"
+            store.save(chat_id, state)
+            continue
+        # Include processed replies too. IDs cannot establish chronology within
+        # one second: ambiguous same-second activity must prevent reactivation.
+        prompt_index = messages.index(prompt)
+        later = messages[prompt_index + 1:]
+        later.extend(
+            message for message in messages[:prompt_index]
+            if (created := _message_datetime(message)) is not None
+            and created >= anchor.replace(microsecond=0)
+        )
+        manual = any(m.get("direction") == "out" and m.get("type") != "system"
+                     and not store.is_bot_outgoing(chat_id, str(m.get("id") or "")) for m in later)
+        answered = any(m.get("direction") == "in" and m.get("type") != "system" for m in later)
+        if manual or answered:
+            stop_reminders(state, permanently=manual)
+            state.notes["reminder_migration"] = "manual" if manual else "answered"
+            store.save(chat_id, state)
+            continue
+        old_count = state.reminder_count
+        arm_reminders(state, config, now=anchor)
+        # Keep sent milestones and skip missed ones, rather than replaying them.
+        elapsed = (now - anchor).total_seconds()
+        milestone = max((i for i, value in enumerate(config.delays_seconds) if elapsed >= value), default=0)
+        state.reminder_count = min(2, max(old_count, milestone))
+        state.reminder_due_at = max(now, anchor + timedelta(seconds=config.delays_seconds[state.reminder_count])).isoformat()
+        state.notes["reminder_migration"] = "verified_question"
+        store.save(chat_id, state)
+        migrated += 1
+    return migrated
 
 
 def oldest_first(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -755,12 +876,14 @@ def infer_step_from_bot_message(text: str | None) -> str | None:
         return "awaiting_datetime"
     if normalized == CONFIRMATION_MESSAGE.strip():
         return "awaiting_full_name"
-    if normalized == DATE_REMINDER_MESSAGE.strip():
+    if normalized in {DATE_REMINDER_MESSAGE.strip(), LEGACY_DATE_REMINDER_MESSAGE.strip()}:
         return "awaiting_datetime"
-    if normalized == MORE_INFO_MESSAGE.strip():
+    if normalized in {MORE_INFO_MESSAGE.strip(), LEGACY_MORE_INFO_MESSAGE.strip()}:
         return "awaiting_call"
-    if normalized == CALL_HANDOFF_MESSAGE.strip():
+    if normalized in {CALL_HANDOFF_MESSAGE.strip(), LEGACY_CALL_HANDOFF_MESSAGE.strip()}:
         return "manual_takeover"
+    if normalized.startswith("Здравствуйте.\nХотели уточнить, актуальна ли для вас еще вакансия"):
+        return "awaiting_reactivation"
     if normalized == "И номер":
         return "awaiting_phone"
     if normalized.startswith("Готово, вы записаны!"):
@@ -963,6 +1086,66 @@ def process_chat_message(
     state.city = city or state.city
     state.item_id = item_id or state.item_id
 
+    if state.application_status in {"completed", "manual", "cancelled"} or state.step in {"done", "manual_takeover"}:
+        store.mark_message_seen(chat_id, message_id, normalized_created(message))
+        return
+    if state.reminder_inflight_number:
+        delivered = _find_delivered_inflight_reminder(
+            client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT), state
+        )
+        if delivered:
+            if delivered[0]:
+                store.mark_bot_outgoing(chat_id, delivered[0])
+            finish_reminder(state, configured_reminders, sent_at=delivered[1])
+            store.save(chat_id, state)
+
+    if state.step == "awaiting_reactivation" and state.reminders_stopped:
+        store.mark_message_seen(chat_id, message_id, normalized_created(message))
+        return
+
+    if (
+        state.step == "sending_reactivation_intro"
+        and message_id != state.reactivation_reply_trigger_id
+        and state.reactivation_reply_inflight_at
+        and state.reactivation_reply_index < len(state.reactivation_reply_messages)
+    ):
+        # A new reply supersedes the pending sequence, but must not erase our
+        # ability to identify an already delivered POST whose response was lost.
+        probe = ConversationState(
+            reminder_inflight_text=state.reactivation_reply_messages[state.reactivation_reply_index],
+            reminder_inflight_started_at=state.reactivation_reply_inflight_at,
+        )
+        delivered = _find_delivered_inflight_reminder(
+            client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT), probe
+        )
+        if delivered and delivered[0]:
+            store.mark_bot_outgoing(chat_id, delivered[0])
+
+    if state.step == "sending_reactivation_intro" and is_call_request(text):
+        state.reactivation_reply_messages = []
+        state.reactivation_reply_trigger_id = None
+        state.reactivation_reply_inflight_at = None
+    elif state.step == "sending_reactivation_intro":
+        trigger = state.reactivation_reply_trigger_id
+        if message_id == trigger:
+            resume_reactivation_sequence(client, store, chat_id, state, configured_reminders)
+            return
+        # A new candidate response supersedes unsent questions; do not deadlock
+        # waiting for a retry while that response is already available.
+        state.reactivation_reply_messages = []
+        state.reactivation_reply_inflight_at = None
+        state.reactivation_reply_trigger_id = None
+        state.step = "awaiting_warehouse" if warehouse_group_for_city(state.city) else "awaiting_datetime"
+        if trigger:
+            store.mark_message_seen(chat_id, trigger, None)
+
+    if state.step == "awaiting_reactivation" and is_reactivation_acceptance(text):
+        prepare_reactivation_sequence(
+            store, chat_id, state, message_id, regional_locations, regional_overrides
+        )
+        resume_reactivation_sequence(client, store, chat_id, state, configured_reminders)
+        return
+
     if (
         regional_locations is not None
         and state.step in {"idle", "sending_regional_intro"}
@@ -1078,6 +1261,110 @@ def send_regional_initial_sequence(
     store.save(chat_id, state)
 
 
+def prepare_reactivation_sequence(
+    store: SQLiteStateStore, chat_id: str, state: ConversationState,
+    message_id: str, catalog: RegionalLocationCatalog | None,
+    overrides: dict[str, str] | None = None,
+) -> None:
+    """Persist the complete reply before the first send; keep candidate data."""
+    if warehouse_group_for_city(state.city):
+        prompt = warehouse_prompt_for_city(state.city)
+        if not prompt:
+            raise ValueError("Не найден каталог складов для повторной записи")
+        texts = [f'❗️{prompt}\nили "0" если не актуально.']
+    else:
+        if catalog is None:
+            raise ValueError("Каталог регионов недоступен для повторной записи")
+        location = catalog.resolve(state.city, state.item_id, overrides)
+        state.service_center = location.service_center
+        state.address = location.address
+        state.internship_time = location.internship_time
+        state.warehouse_selection_source = "regional_catalog"
+        texts = list(regional_initial_messages(location)[-2:])
+    if any(not text or len(text) > 1000 for text in texts):
+        raise ValueError("Сообщение повторной записи не укладывается в лимит Avito")
+    stop_reminders(state)
+    state.reactivation_sent = True
+    state.step = "sending_reactivation_intro"
+    state.reactivation_reply_messages = texts
+    state.reactivation_reply_index = 0
+    state.reactivation_reply_trigger_id = message_id
+    state.reactivation_reply_inflight_at = None
+    state.reactivation_reply_started_at = datetime.now(timezone.utc).isoformat()
+    store.save(chat_id, state)
+
+
+def resume_reactivation_sequence(
+    client: AvitoClient, store: SQLiteStateStore, chat_id: str,
+    state: ConversationState, config: ReminderConfig,
+) -> None:
+    if state.step != "sending_reactivation_intro" or state.application_status != "collecting" or state.reminders_stopped:
+        return
+    texts = state.reactivation_reply_messages
+    if not texts or not state.reactivation_reply_trigger_id:
+        raise ValueError("Повреждено состояние повторного приглашения")
+    # Also verify history once every reply has been delivered. Otherwise a
+    # recovered last POST could re-arm timers over an intervening human reply.
+    while True:
+        text = texts[state.reactivation_reply_index] if state.reactivation_reply_index < len(texts) else None
+        now = datetime.now(timezone.utc)
+        messages = client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT)
+        if state.reactivation_reply_inflight_at and text is not None:
+            # A timed-out POST may already have been delivered. Reconcile before retry.
+            probe = ConversationState(
+                reminder_inflight_text=text,
+                reminder_inflight_started_at=state.reactivation_reply_inflight_at,
+            )
+            delivered = _find_delivered_inflight_reminder(messages, probe)
+            if delivered:
+                if delivered[0]:
+                    store.mark_bot_outgoing(chat_id, delivered[0])
+                state.reactivation_reply_index += 1
+                state.reactivation_reply_inflight_at = None
+                store.save(chat_id, state)
+                continue
+            started = datetime.fromisoformat(state.reactivation_reply_inflight_at)
+            if now < started + timedelta(seconds=config.inflight_grace_seconds):
+                return
+        if state.reactivation_reply_started_at:
+            # Match Avito's second precision so a simultaneous human reply is
+            # not discarded as older than our local sub-second timestamp.
+            started = datetime.fromisoformat(state.reactivation_reply_started_at).replace(microsecond=0)
+            pending_candidate = False
+            for message in messages:
+                created = _message_datetime(message)
+                if created is None or created < started or message.get("type") == "system":
+                    continue
+                mid = str(message.get("id") or "")
+                if message.get("direction") == "out" and not store.is_bot_outgoing(chat_id, mid):
+                    stop_reminders(state, permanently=True)
+                    state.application_status = "manual"
+                    state.step = "manual_takeover"
+                    state.reactivation_reply_messages = []
+                    store.save(chat_id, state)
+                    return
+                if message.get("direction") == "in" and mid != state.reactivation_reply_trigger_id and not store.is_processed(chat_id, mid):
+                    pending_candidate = True
+            if pending_candidate:
+                return
+        if text is None:
+            break
+        state.reactivation_reply_inflight_at = now.isoformat()
+        store.save(chat_id, state)
+        response = send_bot_message(client, store, chat_id, text)
+        if not sent_message_id(response):
+            return
+        state.reactivation_reply_index += 1
+        state.reactivation_reply_inflight_at = None
+        store.save(chat_id, state)
+    state.step = "awaiting_warehouse" if warehouse_group_for_city(state.city) else "awaiting_datetime"
+    store.mark_message_seen(chat_id, state.reactivation_reply_trigger_id, None)
+    state.reactivation_reply_trigger_id = None
+    state.reactivation_reply_messages = []
+    arm_reminders(state, config)
+    store.save(chat_id, state)
+
+
 def main() -> None:
     missing = [
         name
@@ -1136,8 +1423,8 @@ def main() -> None:
                     reminder_boundary_key, str(reminder_manual_stop_after)
                 )
         print(
-            "Follow-up reminders enabled with sequential delays="
-            f"{reminder_config.delays_seconds}s"
+            "Follow-up reminders enabled with question-relative offsets="
+            f"{reminder_config.all_offsets}s"
         )
     interrupted = store.quarantine_interrupted_submissions()
     if interrupted:
@@ -1181,6 +1468,8 @@ def main() -> None:
     regional_overrides = parse_service_center_overrides(
         os.getenv("SERVICE_CENTER_OVERRIDES_JSON", "")
     )
+
+
     interval = max(5, int(os.getenv("POLL_INTERVAL_SECONDS", "15")))
     warehouse_source = GoogleSheetWarehouseSource(
         sheet_id=os.getenv(
@@ -1368,6 +1657,13 @@ def main() -> None:
                 except Exception as exc:
                     failed_chats.add(values[0])
                     print(f"message error chat_id={values[0]}: {exc}")
+
+            for chat_id, state in store.all_conversations():
+                if state.step == "sending_reactivation_intro" and chat_id not in failed_chats:
+                    try:
+                        resume_reactivation_sequence(client, store, chat_id, state, reminder_config)
+                    except Exception as exc:
+                        print(f"reactivation reply error chat_id={chat_id}: {exc}")
 
             processed_since_health += process_due_reminders(
                 client,
