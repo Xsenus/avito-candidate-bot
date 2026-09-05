@@ -48,10 +48,7 @@ def test_single_policy_repeats_date_question_without_operator_offer(answer):
 
     assert state.step == "awaiting_datetime"
     assert state.application_status == "collecting"
-    assert reply == (
-        "Стажировка каждый день в 9:00:00, на какой день вас записать? "
-        "Укажите день недели например: Вторник"
-    )
+    assert reply == "Укажите день недели или дату в формате ДД.ММ.ГГГГ"
     assert "Оператор" not in reply
 
 

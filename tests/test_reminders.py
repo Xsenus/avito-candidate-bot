@@ -264,7 +264,9 @@ def test_single_policy_invalid_reply_repeats_question_and_rearms_once(tmp_path):
     due = datetime.fromisoformat(restored.reminder_due_at)
     assert due >= now + timedelta(hours=23, minutes=59)
     assert len(client.sent) == 1
-    assert "на какой день вас записать" in client.sent[0][1]
+    assert client.sent[0][1] == (
+        "Укажите день недели или дату в формате ДД.ММ.ГГГГ"
+    )
     assert "Оператор" not in client.sent[0][1]
     store.close()
 

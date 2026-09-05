@@ -7,7 +7,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .avito_client import AvitoClient
-from .candidate import normalize_phone, resolve_internship_date, split_full_name
+from .candidate import (
+    DATE_INPUT_ERROR_MESSAGE,
+    normalize_phone,
+    resolve_internship_date,
+    split_full_name,
+)
 from .warehouses import (
     parse_warehouse_choice,
     warehouse_group_for_city,
@@ -400,10 +405,7 @@ def _repeat_current_question(state: ConversationState) -> str:
     if state.step == "awaiting_warehouse":
         return warehouse_prompt_for_city(state.city) or ""
     if state.step == "awaiting_datetime":
-        internship_time = selected_internship_time(state)
-        if internship_time:
-            return internship_day_message(internship_time)
-        return DATE_REMINDER_MESSAGE.split("\n", 1)[1]
+        return DATE_INPUT_ERROR_MESSAGE
     return ""
 
 

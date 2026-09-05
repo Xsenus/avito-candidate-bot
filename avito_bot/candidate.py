@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from datetime import date, timedelta
 
-
 WEEKDAY_PATTERNS = {
     0: (r"понедельник(?:а|е)?", r"пн"),
     1: (r"вторник(?:а|е)?", r"вт"),
@@ -29,6 +28,8 @@ NON_NAME_WORDS = {
     "сегодня",
     "завтра",
 }
+
+DATE_INPUT_ERROR_MESSAGE = "Укажите день недели или дату в формате ДД.ММ.ГГГГ"
 
 
 def split_full_name(value: str) -> tuple[str, str]:
@@ -102,7 +103,7 @@ def resolve_internship_date(value: str, *, today: date | None = None) -> date:
         except ValueError:
             continue
 
-    raise ValueError("Укажите день недели или дату в формате ДД.ММ.ГГГГ")
+    raise ValueError(DATE_INPUT_ERROR_MESSAGE)
 
 
 def _parse_date(value: str, fmt: str) -> date:
