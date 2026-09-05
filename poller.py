@@ -551,10 +551,16 @@ def process_due_reminders(
     current = now or datetime.now(timezone.utc)
     migrate_waiting_reminders(client, store, config, now=current)
     sent = 0
+    reminder_steps = {"awaiting_warehouse", "awaiting_datetime"}
+    if not config.single_24h_only:
+        reminder_steps.add("awaiting_reactivation")
     for chat_id, state in store.all_conversations():
-        if state.reminders_stopped or state.application_status != "collecting" or state.step not in {
-            "awaiting_warehouse", "awaiting_datetime", "awaiting_reactivation"
-        }:
+        if (
+            state.reminders_stopped
+            or state.application_status != "collecting"
+            or state.step not in reminder_steps
+            or state.reminder_policy_version < config.policy_version
+        ):
             continue
         if not state.reminder_inflight_number and not reminder_is_due(
             state, now=current
@@ -603,11 +609,7 @@ def process_due_reminders(
         # Missed deadlines do not result in a burst after downtime.
         if state.reminder_armed_at:
             anchor = datetime.fromisoformat(state.reminder_armed_at)
-            offsets = (
-                config.delays_seconds[:2]
-                if state.reactivation_sent and state.step != "awaiting_reactivation"
-                else config.all_offsets
-            )
+            offsets = config.all_offsets
             for index, offset in enumerate(offsets):
                 if current >= anchor + timedelta(seconds=offset):
                     state.reminder_count = max(state.reminder_count, index)
@@ -650,6 +652,10 @@ def migrate_waiting_reminders(
     """
     if not config.enabled:
         return 0
+    if config.single_24h_only:
+        return _migrate_single_reminder_policy(
+            client, store, config, now=now, batch_size=500
+        )
     migrated = checked = 0
     for chat_id, state in store.all_conversations():
         if state.reminder_policy_version >= 2 or state.reminder_inflight_number:
@@ -709,6 +715,100 @@ def migrate_waiting_reminders(
         state.reminder_count = min(2, max(old_count, milestone))
         state.reminder_due_at = max(now, anchor + timedelta(seconds=config.delays_seconds[state.reminder_count])).isoformat()
         state.notes["reminder_migration"] = "verified_question"
+        store.save(chat_id, state)
+        migrated += 1
+    return migrated
+
+
+def _migrate_single_reminder_policy(
+    client: AvitoClient,
+    store: SQLiteStateStore,
+    config: ReminderConfig,
+    *,
+    now: datetime,
+    batch_size: int,
+) -> int:
+    """Retire old multi-step campaigns without replaying an overdue backlog."""
+    migrated = 0
+    for chat_id, state in store.all_conversations():
+        if migrated >= batch_size:
+            break
+        if (
+            state.reminder_policy_version >= config.policy_version
+            or state.application_status != "collecting"
+        ):
+            continue
+        if state.reminder_inflight_number:
+            try:
+                messages = client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT)
+            except Exception:  # noqa: BLE001 - fail closed until history returns
+                continue
+            delivered = _find_delivered_inflight_reminder(messages, state)
+            if delivered:
+                message_id, _ = delivered
+                if message_id:
+                    store.mark_bot_outgoing(chat_id, message_id)
+                state.reminder_count = max(
+                    state.reminder_count, state.reminder_inflight_number
+                )
+                clear_inflight_for_retry(state)
+                stop_reminders(state, permanently=True)
+                state.reminder_policy_version = config.policy_version
+                state.notes["reminder_migration"] = "legacy_inflight_delivered"
+                store.save(chat_id, state)
+                migrated += 1
+                continue
+            if not inflight_retry_is_due(state, config, now=now):
+                continue
+            clear_inflight_for_retry(state)
+        if state.step in {"awaiting_reactivation", "sending_reactivation_intro"}:
+            state.step = (
+                "awaiting_warehouse"
+                if warehouse_group_for_city(state.city)
+                and state.warehouse_choice is None
+                else "awaiting_datetime"
+            )
+            state.reactivation_reply_messages = []
+            state.reactivation_reply_trigger_id = None
+            state.reactivation_reply_inflight_at = None
+            stop_reminders(state, permanently=True)
+            state.reminder_policy_version = config.policy_version
+            state.notes["reminder_migration"] = "legacy_campaign_retired"
+            store.save(chat_id, state)
+            migrated += 1
+            continue
+        if state.step not in {"awaiting_warehouse", "awaiting_datetime"}:
+            continue
+        state.reminder_policy_version = config.policy_version
+        if (
+            state.reminders_stopped
+            or state.reminder_count > 0
+            or state.reactivation_sent
+        ):
+            stop_reminders(state, permanently=state.reminders_stopped)
+            state.notes["reminder_migration"] = "already_reminded"
+            store.save(chat_id, state)
+            migrated += 1
+            continue
+        try:
+            anchor = datetime.fromisoformat(state.reminder_armed_at or "")
+        except ValueError:
+            anchor = None
+        if anchor is None or anchor.tzinfo is None:
+            stop_reminders(state)
+            state.notes["reminder_migration"] = "missing_anchor"
+        else:
+            due_at = anchor + timedelta(seconds=config.single_delay_seconds)
+            if due_at <= now:
+                # The new policy must not suddenly message thousands of old
+                # chats when it is enabled. Only still-future 24h reminders
+                # are preserved; missed historical windows are retired.
+                stop_reminders(state)
+                state.notes["reminder_migration"] = "missed_single_window"
+            else:
+                state.reminder_step = state.step
+                state.reminder_due_at = due_at.isoformat()
+                state.notes["reminder_migration"] = "single_24h_scheduled"
         store.save(chat_id, state)
         migrated += 1
     return migrated
@@ -932,6 +1032,11 @@ def infer_step_from_bot_message(text: str | None) -> str | None:
     if "❗️Подобрали для вас склады" in normalized:
         return "awaiting_warehouse"
     if (
+        normalized.startswith("❗️Напоминаю — вакансия ещё актуальна.\n")
+        and "Подобрали для вас склады" in normalized
+    ):
+        return "awaiting_warehouse"
+    if (
         normalized.startswith("Стажировка каждый день в ")
         and "на какой день вас записать?" in normalized
     ):
@@ -1148,6 +1253,24 @@ def process_chat_message(
     state.city = city or state.city
     state.item_id = item_id or state.item_id
 
+    if configured_reminders.single_24h_only and state.step in {
+        "awaiting_call",
+        "awaiting_reactivation",
+        "sending_reactivation_intro",
+    }:
+        state.step = (
+            "awaiting_warehouse"
+            if warehouse_group_for_city(state.city)
+            and state.warehouse_choice is None
+            else "awaiting_datetime"
+        )
+        state.reactivation_reply_messages = []
+        state.reactivation_reply_trigger_id = None
+        state.reactivation_reply_inflight_at = None
+        stop_reminders(state, permanently=True)
+        state.reminder_policy_version = configured_reminders.policy_version
+        store.save(chat_id, state)
+
     if state.application_status in {"completed", "manual", "cancelled"} or state.step in {"done", "manual_takeover"}:
         store.mark_message_seen(chat_id, message_id, normalized_created(message))
         return
@@ -1161,11 +1284,17 @@ def process_chat_message(
             finish_reminder(state, configured_reminders, sent_at=delivered[1])
             store.save(chat_id, state)
 
-    if state.step == "awaiting_reactivation" and state.reminders_stopped:
+    if (
+        not configured_reminders.single_24h_only
+        and state.step == "awaiting_reactivation"
+        and state.reminders_stopped
+    ):
         store.mark_message_seen(chat_id, message_id, normalized_created(message))
         return
 
     if (
+        not configured_reminders.single_24h_only
+        and
         state.step == "sending_reactivation_intro"
         and message_id != state.reactivation_reply_trigger_id
         and state.reactivation_reply_inflight_at
@@ -1183,11 +1312,18 @@ def process_chat_message(
         if delivered and delivered[0]:
             store.mark_bot_outgoing(chat_id, delivered[0])
 
-    if state.step == "sending_reactivation_intro" and is_call_request(text):
+    if (
+        not configured_reminders.single_24h_only
+        and state.step == "sending_reactivation_intro"
+        and is_call_request(text)
+    ):
         state.reactivation_reply_messages = []
         state.reactivation_reply_trigger_id = None
         state.reactivation_reply_inflight_at = None
-    elif state.step == "sending_reactivation_intro":
+    elif (
+        not configured_reminders.single_24h_only
+        and state.step == "sending_reactivation_intro"
+    ):
         trigger = state.reactivation_reply_trigger_id
         if message_id == trigger:
             resume_reactivation_sequence(client, store, chat_id, state, configured_reminders)
@@ -1201,7 +1337,11 @@ def process_chat_message(
         if trigger:
             store.mark_message_seen(chat_id, trigger, None)
 
-    if state.step == "awaiting_reactivation" and is_reactivation_acceptance(text):
+    if (
+        not configured_reminders.single_24h_only
+        and state.step == "awaiting_reactivation"
+        and is_reactivation_acceptance(text)
+    ):
         prepare_reactivation_sequence(
             store, chat_id, state, message_id, regional_locations, regional_overrides
         )
@@ -1265,7 +1405,12 @@ def process_chat_message(
     # Persist cancellation before parsing or replying. Even if processing the
     # candidate response fails, an already-due reminder must not race it.
     store.save(chat_id, state)
-    reply = handle_user_message(state, text, city_hint=state.city)
+    reply = handle_user_message(
+        state,
+        text,
+        city_hint=state.city,
+        operator_handoff_enabled=not configured_reminders.single_24h_only,
+    )
     if reply:
         send_bot_message(client, store, chat_id, reply)
         arm_reminders(state, configured_reminders)
@@ -1721,7 +1866,11 @@ def main() -> None:
                     print(f"message error chat_id={values[0]}: {exc}")
 
             for chat_id, state in store.all_conversations():
-                if state.step == "sending_reactivation_intro" and chat_id not in failed_chats:
+                if (
+                    not reminder_config.single_24h_only
+                    and state.step == "sending_reactivation_intro"
+                    and chat_id not in failed_chats
+                ):
                     try:
                         resume_reactivation_sequence(client, store, chat_id, state, reminder_config)
                     except Exception as exc:

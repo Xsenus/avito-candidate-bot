@@ -10,6 +10,7 @@ from .avito_client import AvitoClient
 from .candidate import normalize_phone, resolve_internship_date, split_full_name
 from .warehouses import (
     parse_warehouse_choice,
+    warehouse_group_for_city,
     warehouse_prompt_for_city,
     warehouses_for_city,
 )
@@ -160,16 +161,14 @@ CONFIRMATION_MESSAGE = (
 )
 
 REMINDER_LEAD = (
-    "Напоминаю — вакансия ещё актуальна.\n"
-    'Напишите "Оператор" если вы хотите обсудить вакансию с отделом кадров тут в чате.'
+    "Напоминаю — вакансия ещё актуальна."
 )
 
 DATE_REMINDER_MESSAGE = (
     f"{REMINDER_LEAD}\n\n"
     "❗️Выберите дату, чтобы зафиксировать запись и внести вас в списки на "
     "стажировку. Если вы желаете выбрать другую дату напишите нужную дату в "
-    'формате "ДД.ММ"\n\n'
-    'или "0" если не актуально.'
+    'формате "ДД.ММ"'
 )
 
 MORE_INFO_MESSAGE = (
@@ -182,9 +181,14 @@ LEGACY_MORE_INFO_MESSAGE = (
     "Если вам не хватило информации с вами свяжется отдел кадров и подробно "
     'рассказать детали вакансии, просто напишите слово "Звонок"'
 )
-LEGACY_DATE_REMINDER_MESSAGE = DATE_REMINDER_MESSAGE.replace(
-    '"Оператор"', '"Звонок"'
-).replace(" тут в чате.", ".")
+LEGACY_DATE_REMINDER_MESSAGE = (
+    "Напоминаю — вакансия ещё актуальна.\n"
+    'Напишите "Звонок" если вы хотите обсудить вакансию с отделом кадров.\n\n'
+    "❗️Выберите дату, чтобы зафиксировать запись и внести вас в списки на "
+    "стажировку. Если вы желаете выбрать другую дату напишите нужную дату в "
+    'формате "ДД.ММ"\n\n'
+    'или "0" если не актуально.'
+)
 CALL_HANDOFF_MESSAGE = (
     "Наш отдел кадров свяжется с вами в ближайшее время. "
     "Пожалуйста, напишите свои вопросы прямо здесь, в чате. "
@@ -225,8 +229,20 @@ def selected_internship_time(state: ConversationState) -> str | None:
     return None
 
 
-def handle_user_message(state: ConversationState, text: str, client: AvitoClient | None = None, chat_id: str | None = None, city_hint: str | None = None) -> str:
+def handle_user_message(
+    state: ConversationState,
+    text: str,
+    client: AvitoClient | None = None,
+    chat_id: str | None = None,
+    city_hint: str | None = None,
+    *,
+    operator_handoff_enabled: bool | None = None,
+) -> str:
     cleaned = (text or "").strip().lower()
+    if operator_handoff_enabled is None:
+        operator_handoff_enabled = os.getenv(
+            "OPERATOR_HANDOFF_ENABLED", "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
     if state.step == "unsupported":
         return ""
@@ -236,17 +252,34 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
     }:
         return ""
 
-    if is_call_request(cleaned):
+    if operator_handoff_enabled and is_call_request(cleaned):
         stop_reminders(state, permanently=True)
         state.step = "manual_takeover"
         state.application_status = "manual"
         return CALL_HANDOFF_MESSAGE
 
     if state.step == "awaiting_call":
+        if not operator_handoff_enabled:
+            state.application_status = "collecting"
+            state.step = (
+                "awaiting_warehouse"
+                if warehouse_group_for_city(state.city)
+                and state.warehouse_choice is None
+                else "awaiting_datetime"
+            )
+            return _repeat_current_question(state)
         stop_reminders(state, permanently=True)
         return MORE_INFO_MESSAGE
 
     if state.step == "awaiting_reactivation":
+        if not operator_handoff_enabled:
+            state.step = (
+                "awaiting_warehouse"
+                if warehouse_group_for_city(state.city)
+                and state.warehouse_choice is None
+                else "awaiting_datetime"
+            )
+            return _repeat_current_question(state)
         if is_reactivation_acceptance(cleaned):
             state.step = "sending_reactivation_intro"
             return ""
@@ -281,10 +314,14 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
         state.city = normalize_city(city_hint) or state.city
         choice = parse_warehouse_choice(text, state.city)
         if choice == 0:
+            if not operator_handoff_enabled:
+                return _repeat_current_question(state)
             stop_reminders(state, permanently=True)
             state.step = "awaiting_call"
             return MORE_INFO_MESSAGE
         if choice is None:
+            if not operator_handoff_enabled:
+                return _repeat_current_question(state)
             stop_reminders(state, permanently=True)
             state.step = "awaiting_call"
             return MORE_INFO_MESSAGE
@@ -321,6 +358,8 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
         try:
             state.internship_date = resolve_internship_date(text).strftime("%d.%m.%Y")
         except ValueError:
+            if not operator_handoff_enabled:
+                return _repeat_current_question(state)
             stop_reminders(state, permanently=True)
             state.step = "awaiting_call"
             return MORE_INFO_MESSAGE
@@ -354,6 +393,17 @@ def handle_user_message(state: ConversationState, text: str, client: AvitoClient
         state.application_status = "pending"
         return ""
 
+    return ""
+
+
+def _repeat_current_question(state: ConversationState) -> str:
+    if state.step == "awaiting_warehouse":
+        return warehouse_prompt_for_city(state.city) or ""
+    if state.step == "awaiting_datetime":
+        internship_time = selected_internship_time(state)
+        if internship_time:
+            return internship_day_message(internship_time)
+        return DATE_REMINDER_MESSAGE.split("\n", 1)[1]
     return ""
 
 

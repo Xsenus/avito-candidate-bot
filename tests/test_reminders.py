@@ -65,6 +65,7 @@ def config(*delays, grace=60):
         enabled=True,
         delays_seconds=delays or (900, 3600, 86400),
         inflight_grace_seconds=grace,
+        single_24h_only=False,
     )
 
 
@@ -81,6 +82,8 @@ def test_default_config_uses_question_relative_production_offsets(monkeypatch):
 
     assert not value.enabled
     assert value.delays_seconds == (5 * 60, 12 * 60 * 60, 24 * 60 * 60)
+    assert value.single_24h_only
+    assert value.all_offsets == (24 * 60 * 60,)
 
 
 def test_test_delays_are_configurable_without_code_changes(monkeypatch):
@@ -97,12 +100,10 @@ def test_test_delays_are_configurable_without_code_changes(monkeypatch):
 
 def test_date_reminder_exactly_matches_customer_text():
     expected = (
-        "Напоминаю — вакансия ещё актуальна.\n"
-        'Напишите "Оператор" если вы хотите обсудить вакансию с отделом кадров тут в чате.\n\n'
+        "Напоминаю — вакансия ещё актуальна.\n\n"
         "❗️Выберите дату, чтобы зафиксировать запись и внести вас в списки "
         "на стажировку. Если вы желаете выбрать другую дату напишите нужную "
-        'дату в формате "ДД.ММ"\n\n'
-        'или "0" если не актуально.'
+        'дату в формате "ДД.ММ"'
     )
 
     assert DATE_REMINDER_MESSAGE == expected
@@ -128,12 +129,144 @@ def test_warehouse_reminder_uses_current_dynamic_table_values():
     finally:
         replace_warehouse_groups(previous)
 
-    assert text.startswith("Напоминаю — вакансия ещё актуальна.")
-    assert "❗️Подобрали для вас склады" in text
+    assert text == (
+        "❗️Напоминаю — вакансия ещё актуальна.\n"
+        "Подобрали для вас склады — выберите удобный номером:\n\n"
+        "1. Тестовый\n"
+        "   📍 Новый адрес\n"
+        "   🕥 Стажировка в 9:45:00\n\n"
+        "Напишите номер подходящего склада (1–1) 👇"
+    )
+    assert text.startswith("❗️Напоминаю — вакансия ещё актуальна.")
+    assert "Подобрали для вас склады" in text
     assert "📍 Новый адрес" in text
     assert "🕥 Стажировка в 9:45:00" in text
-    assert text.endswith('или "0" если не актуально.')
+    assert text.endswith("Напишите номер подходящего склада (1–1) 👇")
+    assert "Оператор" not in text
+    assert '"0"' not in text
     assert len(text) <= 1000
+
+
+def test_single_policy_sends_exactly_once_at_24_hours(tmp_path):
+    started = datetime(2026, 9, 5, 5, 0, tzinfo=UTC)
+    settings = ReminderConfig(enabled=True)
+    state = ConversationState(step="awaiting_datetime", city="Тула")
+    arm_reminders(state, settings, now=started)
+    store = SQLiteStateStore(tmp_path / "single-24h.sqlite3")
+    store.save("chat-1", state)
+    client = ReminderClient(started)
+
+    assert state.reminder_policy_version == 3
+    assert state.reminder_due_at == (started + timedelta(hours=24)).isoformat()
+    assert process_due_reminders(
+        client, store, settings, now=started + timedelta(hours=23, minutes=59)
+    ) == 0
+    client.now = started + timedelta(hours=24)
+    assert process_due_reminders(client, store, settings, now=client.now) == 1
+    restored = store.load("chat-1")
+    assert restored.reminder_count == 1
+    assert restored.reminder_due_at is None
+    assert restored.reminder_step is None
+    assert [text for _, text in client.sent] == [DATE_REMINDER_MESSAGE]
+    assert process_due_reminders(
+        client, store, settings, now=started + timedelta(days=10)
+    ) == 0
+    assert len(client.sent) == 1
+    store.close()
+
+
+def test_single_policy_migration_never_replays_old_campaign(tmp_path):
+    now = datetime.now(UTC)
+    settings = ReminderConfig(enabled=True)
+    store = SQLiteStateStore(tmp_path / "single-migration.sqlite3")
+
+    future = ConversationState(
+        step="awaiting_datetime",
+        city="Тула",
+        reminder_policy_version=2,
+        reminder_armed_at=(now - timedelta(hours=1)).isoformat(),
+        reminder_due_at=(now - timedelta(minutes=55)).isoformat(),
+    )
+    already_reminded = ConversationState(
+        step="awaiting_datetime",
+        city="Тула",
+        reminder_policy_version=2,
+        reminder_count=1,
+        reminder_armed_at=(now - timedelta(hours=2)).isoformat(),
+        reminder_due_at=(now + timedelta(hours=10)).isoformat(),
+    )
+    missed = ConversationState(
+        step="awaiting_datetime",
+        city="Тула",
+        reminder_policy_version=2,
+        reminder_armed_at=(now - timedelta(days=2)).isoformat(),
+        reminder_due_at=(now - timedelta(days=1)).isoformat(),
+    )
+    for chat_id, state in (
+        ("future", future),
+        ("already", already_reminded),
+        ("missed", missed),
+    ):
+        store.save(chat_id, state)
+
+    client = ReminderClient(now)
+    assert process_due_reminders(client, store, settings, now=now) == 0
+    assert client.sent == []
+    assert store.load("future").reminder_due_at == (
+        now + timedelta(hours=23)
+    ).isoformat()
+    assert store.load("already").reminder_due_at is None
+    assert store.load("missed").reminder_due_at is None
+    assert all(
+        store.load(chat_id).reminder_policy_version == 3
+        for chat_id in ("future", "already", "missed")
+    )
+    store.close()
+
+
+def test_single_policy_invalid_reply_repeats_question_and_rearms_once(tmp_path):
+    now = datetime.now(UTC)
+    settings = ReminderConfig(enabled=True)
+    store = SQLiteStateStore(tmp_path / "single-invalid-reply.sqlite3")
+    state = ConversationState(
+        step="awaiting_datetime",
+        city="Тула",
+        internship_time="8:00:00",
+    )
+    arm_reminders(state, settings, now=now - timedelta(hours=1))
+    store.save("chat-1", state)
+    client = ReminderClient(now)
+    incoming = {
+        "id": "candidate-question",
+        "created": now.timestamp(),
+        "direction": "in",
+        "type": "text",
+        "content": {"text": "Оператор"},
+    }
+
+    process_chat_message(
+        client,
+        object(),
+        store,
+        "chat-1",
+        state,
+        incoming,
+        "candidate-question",
+        "Тула",
+        "item-1",
+        reminder_config=settings,
+    )
+
+    restored = store.load("chat-1")
+    assert restored.step == "awaiting_datetime"
+    assert restored.application_status == "collecting"
+    assert restored.reminder_count == 0
+    due = datetime.fromisoformat(restored.reminder_due_at)
+    assert due >= now + timedelta(hours=23, minutes=59)
+    assert len(client.sent) == 1
+    assert "на какой день вас записать" in client.sent[0][1]
+    assert "Оператор" not in client.sent[0][1]
+    store.close()
 
 
 def test_schedule_is_question_relative_and_finishes_after_third_reminder():

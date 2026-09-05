@@ -15,6 +15,46 @@ from avito_bot.conversation import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _legacy_operator_scenarios(monkeypatch):
+    monkeypatch.setenv("OPERATOR_HANDOFF_ENABLED", "true")
+
+
+@pytest.mark.parametrize("answer", ["0", "Оператор", "не понял"])
+def test_single_policy_repeats_warehouse_question_without_operator_offer(answer):
+    state = ConversationState(step="awaiting_warehouse", city="Москва")
+
+    reply = handle_user_message(
+        state, answer, operator_handoff_enabled=False
+    )
+
+    assert state.step == "awaiting_warehouse"
+    assert state.application_status == "collecting"
+    assert "Подобрали для вас склады" in reply
+    assert "Оператор" not in reply
+
+
+@pytest.mark.parametrize("answer", ["0", "Оператор", "позже"])
+def test_single_policy_repeats_date_question_without_operator_offer(answer):
+    state = ConversationState(
+        step="awaiting_datetime",
+        city="Тула",
+        internship_time="9:00:00",
+    )
+
+    reply = handle_user_message(
+        state, answer, operator_handoff_enabled=False
+    )
+
+    assert state.step == "awaiting_datetime"
+    assert state.application_status == "collecting"
+    assert reply == (
+        "Стажировка каждый день в 9:00:00, на какой день вас записать? "
+        "Укажите день недели например: Вторник"
+    )
+    assert "Оператор" not in reply
+
+
 def test_candidate_answers_are_normalized(monkeypatch):
     state = ConversationState(step="awaiting_datetime")
 

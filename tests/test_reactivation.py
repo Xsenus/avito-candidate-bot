@@ -21,7 +21,12 @@ from avito_bot.storage import SQLiteStateStore
 
 UTC = timezone.utc
 START = datetime(2026, 9, 4, 8, tzinfo=UTC)
-CONFIG = ReminderConfig(enabled=True)
+CONFIG = ReminderConfig(enabled=True, single_24h_only=False)
+
+
+@pytest.fixture(autouse=True)
+def _legacy_operator_scenarios(monkeypatch):
+    monkeypatch.setenv("OPERATOR_HANDOFF_ENABLED", "true")
 
 
 class Clock(datetime):
@@ -393,6 +398,8 @@ def test_late_24h_send_does_not_move_48h_deadline(store):
 
 
 def test_fourth_offset_configuration(monkeypatch):
+    assert ReminderConfig.from_env().all_offsets == (86400,)
+    monkeypatch.setenv("FOLLOW_UP_SINGLE_24H_ONLY", "false")
     assert ReminderConfig.from_env().all_offsets == (300, 43200, 86400, 172800)
     monkeypatch.setenv("FOLLOW_UP_FOURTH_DELAY_SECONDS", "180000")
     assert ReminderConfig.from_env().fourth_delay_seconds == 180000
