@@ -1083,6 +1083,91 @@ def test_unsupported_city_is_marked_without_outgoing_messages(tmp_path):
     store.close()
 
 
+def test_manual_outgoing_wins_when_candidate_replies_before_next_poll(tmp_path):
+    store = SQLiteStateStore(tmp_path / "manual-before-candidate.sqlite3")
+    store.save(
+        "chat-1",
+        ConversationState(
+            step="awaiting_datetime",
+            application_status="collecting",
+            city="Тюмень",
+        ),
+    )
+    store.mark_message_seen("chat-1", "previous-message", 100)
+    manager = {
+        "id": "manager-message",
+        "created": 200,
+        "direction": "out",
+        "type": "text",
+        "content": {"text": "Минуту, запишу вас"},
+    }
+    candidate = {
+        "id": "candidate-message",
+        "created": 201,
+        "direction": "in",
+        "type": "text",
+        "content": {"text": "+7 900 000-00-00"},
+    }
+    candidate_chat = chat()
+    candidate_chat["last_message"] = candidate
+
+    assert not list(
+        iter_new_chat_messages(
+            FakeHistoryClient([candidate, manager]),
+            [candidate_chat],
+            store,
+            manual_takeover_after=150,
+        )
+    )
+    restored = store.load("chat-1")
+    assert restored.step == "manual_takeover"
+    assert restored.application_status == "manual"
+    assert restored.manual_takeover_message_id == "manager-message"
+    assert store.is_processed("chat-1", "manager-message")
+    assert store.is_processed("chat-1", "candidate-message")
+    store.close()
+
+
+def test_same_second_manual_outgoing_wins_regardless_of_opaque_id_order(tmp_path):
+    store = SQLiteStateStore(tmp_path / "same-second-manual.sqlite3")
+    store.save(
+        "chat-1",
+        ConversationState(step="awaiting_datetime", application_status="collecting"),
+    )
+    store.mark_message_seen("chat-1", "previous-message", 100)
+    messages = [
+        {
+            "id": "z-candidate",
+            "created": 200,
+            "direction": "in",
+            "type": "text",
+            "content": {"text": "Ответ кандидата"},
+        },
+        {
+            "id": "a-manager",
+            "created": 200,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": "Отвечу вручную"},
+        },
+    ]
+    candidate_chat = chat()
+    candidate_chat["last_message"] = messages[0]
+
+    assert not list(
+        iter_new_chat_messages(
+            FakeHistoryClient(messages),
+            [candidate_chat],
+            store,
+            manual_takeover_after=150,
+        )
+    )
+    restored = store.load("chat-1")
+    assert restored.application_status == "manual"
+    assert restored.manual_takeover_message_id == "a-manager"
+    store.close()
+
+
 def test_phone_triggers_form_then_invitation_and_persists_completion(tmp_path):
     store = SQLiteStateStore(tmp_path / "workflow.sqlite3")
     state = ConversationState(

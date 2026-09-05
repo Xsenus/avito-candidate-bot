@@ -194,6 +194,68 @@ def iter_new_chat_messages(
             "done",
             "manual_takeover",
         }
+
+        # A manager and a candidate can both write between two polling cycles.
+        # Avito IDs are opaque and same-second ordering is ambiguous, so looking
+        # at messages one by one can yield the candidate reply before noticing
+        # that a human already took over.  Pre-scan the whole eligible history:
+        # a manual outgoing must always win and silence this chat first.
+        if not terminal and manual_takeover_after is not None:
+            for outgoing in messages:
+                outgoing_id = str(outgoing.get("id") or "").strip()
+                if (
+                    not outgoing_id
+                    or store.is_processed(chat_id, outgoing_id)
+                    or outgoing.get("direction") == "in"
+                    or outgoing.get("type") != "text"
+                ):
+                    continue
+                outgoing_key = message_key(outgoing)
+                created = normalized_created(outgoing)
+                if (
+                    created is None
+                    or created < manual_takeover_after
+                    or (
+                        outgoing_key is not None
+                        and cursor is not None
+                        and outgoing_key[0] < cursor[0]
+                    )
+                ):
+                    continue
+                probe = state
+                if (
+                    state.reactivation_reply_inflight_at
+                    and state.reactivation_reply_index < len(state.reactivation_reply_messages)
+                ):
+                    probe = ConversationState(
+                        reminder_inflight_started_at=state.reactivation_reply_inflight_at,
+                        reminder_inflight_text=state.reactivation_reply_messages[
+                            state.reactivation_reply_index
+                        ],
+                    )
+                if _find_delivered_inflight_reminder([outgoing], probe):
+                    store.mark_bot_outgoing(chat_id, outgoing_id)
+                    continue
+                if store.is_bot_outgoing(chat_id, outgoing_id):
+                    continue
+                stop_reminders(state, permanently=True)
+                state.step = "manual_takeover"
+                state.application_status = "manual"
+                state.last_error = None
+                state.manual_takeover_at = datetime.now(timezone.utc).isoformat()
+                state.manual_takeover_message_id = outgoing_id
+                store.save(chat_id, state)
+                store.mark_message_seen(
+                    chat_id,
+                    outgoing_id,
+                    outgoing_key[0] if outgoing_key else None,
+                )
+                terminal = True
+                print(
+                    f"manual takeover chat_id={chat_id} "
+                    f"message_id={outgoing_id}; bot paused"
+                )
+                break
         for message in messages:
             message_id = str(message.get("id") or "").strip()
             if not message_id or store.is_processed(chat_id, message_id):
