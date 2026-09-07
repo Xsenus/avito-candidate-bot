@@ -162,7 +162,9 @@ def test_negative_answers_are_not_mistaken_for_positive(answer):
         "Королев",
         "Лыткарино",
         "Железнодорожный",
+        "Жуковский",
         "Пушкино",
+        "Реутов",
     ],
 )
 def test_moscow_region_starts_with_three_messages(city):
