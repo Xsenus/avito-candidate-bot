@@ -120,14 +120,19 @@ def iter_new_chat_messages(
         city, item_id = extract_chat_context(chat)
         state = store.load(chat_id)
         messages = oldest_first(client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT))
-        latest_job_application_id = next(
+        latest_job_application = next(
             (
-                str(message.get("id") or "").strip()
+                message
                 for message in reversed(messages)
                 if is_job_application_system_message(message)
                 and str(message.get("id") or "").strip()
             ),
             None,
+        )
+        latest_job_application_id = (
+            str(latest_job_application.get("id") or "").strip()
+            if latest_job_application is not None
+            else None
         )
         cursor = store.get_message_cursor(chat_id)
         only_last_message = False
@@ -190,10 +195,43 @@ def iter_new_chat_messages(
             else:
                 only_last_message = True
 
-        terminal = state.application_status in {"completed", "manual"} or state.step in {
+        terminal = state.application_status in {
+            "completed",
+            "manual",
+            "cancelled",
+        } or state.step in {
             "done",
             "manual_takeover",
         }
+        reapplication_created = None
+        if (
+            terminal
+            and latest_job_application is not None
+            and latest_job_application_id is not None
+            and not store.is_processed(chat_id, latest_job_application_id)
+        ):
+            application_created = normalized_created(latest_job_application)
+            is_after_installation = (
+                not_before_timestamp is None
+                or (
+                    application_created is not None
+                    and application_created >= not_before_timestamp
+                )
+            )
+            is_after_cursor = (
+                cursor is None
+                or application_created is None
+                or application_created >= cursor[0]
+            )
+            if is_after_installation and is_after_cursor:
+                previous_status = state.application_status
+                previous_step = state.step
+                state = ConversationState()
+                state.notes["reapplication_previous_status"] = previous_status
+                state.notes["reapplication_previous_step"] = previous_step
+                store.save(chat_id, state)
+                terminal = False
+                reapplication_created = application_created
 
         # A manager and a candidate can both write between two polling cycles.
         # Avito IDs are opaque and same-second ordering is ambiguous, so looking
@@ -215,6 +253,10 @@ def iter_new_chat_messages(
                 if (
                     created is None
                     or created < manual_takeover_after
+                    or (
+                        reapplication_created is not None
+                        and created < reapplication_created
+                    )
                     or (
                         outgoing_key is not None
                         and cursor is not None
@@ -261,6 +303,13 @@ def iter_new_chat_messages(
             if not message_id or store.is_processed(chat_id, message_id):
                 continue
             key = message_key(message)
+            if (
+                reapplication_created is not None
+                and key is not None
+                and key[0] < reapplication_created
+            ):
+                store.mark_message_seen(chat_id, message_id, key[0])
+                continue
             if (
                 only_last_message
                 and message_id != last_message_id

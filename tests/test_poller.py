@@ -303,6 +303,134 @@ def test_new_job_application_uses_newest_trigger_when_chat_preview_is_stale(
     store.close()
 
 
+@pytest.mark.parametrize(
+    ("previous_status", "previous_step"),
+    [
+        ("completed", "done"),
+        ("manual", "manual_takeover"),
+        ("cancelled", "done"),
+    ],
+)
+def test_new_job_application_restarts_terminal_chat_once(
+    tmp_path, previous_status, previous_step,
+):
+    store = SQLiteStateStore(tmp_path / "terminal-reapplication.sqlite3")
+    store.save(
+        "chat-1",
+        ConversationState(
+            step=previous_step,
+            application_status=previous_status,
+            city="Старый город",
+            full_name="Старые данные",
+            phone="+79990000000",
+        ),
+    )
+    store.mark_message_seen("chat-1", "old-message", 100)
+    messages = [
+        {
+            "id": "old-message",
+            "created": 100,
+            "direction": "in",
+            "type": "text",
+            "content": {"text": "старый ответ"},
+        },
+        job_application_message("job", 200, "job"),
+        job_application_message("enrichment", 201, "job_apply_enrichment"),
+    ]
+    candidate_chat = chat()
+    candidate_chat["last_message"] = messages[-1]
+
+    yielded = list(
+        iter_new_chat_messages(FakeHistoryClient(messages), [candidate_chat], store)
+    )
+
+    assert [values[3] for values in yielded] == ["enrichment"]
+    restarted = yielded[0][1]
+    assert restarted.step == "idle"
+    assert restarted.application_status == "collecting"
+    assert restarted.city is None
+    assert restarted.full_name is None
+    assert restarted.phone is None
+    assert restarted.notes["reapplication_previous_status"] == previous_status
+    assert restarted.notes["reapplication_previous_step"] == previous_step
+    assert store.is_processed("chat-1", "job")
+    store.close()
+
+
+def test_manual_reply_after_terminal_reapplication_still_wins(tmp_path):
+    store = SQLiteStateStore(tmp_path / "terminal-reapplication-manual.sqlite3")
+    store.save(
+        "chat-1",
+        ConversationState(step="done", application_status="completed"),
+    )
+    store.mark_message_seen("chat-1", "old-message", 100)
+    messages = [
+        {
+            "id": "old-message",
+            "created": 100,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": "старый ответ менеджера"},
+        },
+        job_application_message("job", 200, "job"),
+        job_application_message("enrichment", 201, "job_apply_enrichment"),
+        {
+            "id": "new-manual",
+            "created": 220,
+            "direction": "out",
+            "type": "text",
+            "content": {"text": "новый ответ менеджера"},
+        },
+    ]
+    candidate_chat = chat(direction="out")
+    candidate_chat["last_message"] = messages[-1]
+
+    yielded = list(
+        iter_new_chat_messages(
+            FakeHistoryClient(messages),
+            [candidate_chat],
+            store,
+            manual_takeover_after=150,
+        )
+    )
+
+    assert yielded == []
+    state = store.load("chat-1")
+    assert state.step == "manual_takeover"
+    assert state.application_status == "manual"
+    assert state.manual_takeover_message_id == "new-manual"
+    assert store.is_processed("chat-1", "job")
+    assert store.is_processed("chat-1", "enrichment")
+    store.close()
+
+
+def test_terminal_application_before_installation_boundary_is_not_restarted(tmp_path):
+    store = SQLiteStateStore(tmp_path / "terminal-old-application.sqlite3")
+    store.save(
+        "chat-1",
+        ConversationState(step="manual_takeover", application_status="manual"),
+    )
+    store.mark_message_seen("chat-1", "older-message", 50)
+    message = job_application_message("old-job", 100, "job")
+    candidate_chat = chat()
+    candidate_chat["last_message"] = message
+
+    yielded = list(
+        iter_new_chat_messages(
+            FakeHistoryClient([message]),
+            [candidate_chat],
+            store,
+            not_before_timestamp=150,
+        )
+    )
+
+    assert yielded == []
+    state = store.load("chat-1")
+    assert state.step == "manual_takeover"
+    assert state.application_status == "manual"
+    store.close()
+
+
 def test_unrelated_system_message_is_ignored(tmp_path):
     store = SQLiteStateStore(tmp_path / "unrelated-system.sqlite3")
     message = job_application_message("unrelated", 100, "some_other_flow")
