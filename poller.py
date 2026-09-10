@@ -84,7 +84,7 @@ from avito_bot.yandex_form import FormConfigurationError, YandexFormSubmitter
 load_dotenv()
 
 CHAT_PAGE_LIMIT = 100
-JOB_APPLICATION_FLOW_IDS = frozenset({"job", "job_apply_enrichment"})
+JOB_APPLICATION_FLOW_IDS = frozenset({"job"})
 
 
 def is_job_application_system_message(message: dict[str, Any]) -> bool:
@@ -203,35 +203,6 @@ def iter_new_chat_messages(
             "done",
             "manual_takeover",
         }
-        reapplication_created = None
-        if (
-            terminal
-            and latest_job_application is not None
-            and latest_job_application_id is not None
-            and not store.is_processed(chat_id, latest_job_application_id)
-        ):
-            application_created = normalized_created(latest_job_application)
-            is_after_installation = (
-                not_before_timestamp is None
-                or (
-                    application_created is not None
-                    and application_created >= not_before_timestamp
-                )
-            )
-            is_after_cursor = (
-                cursor is None
-                or application_created is None
-                or application_created >= cursor[0]
-            )
-            if is_after_installation and is_after_cursor:
-                previous_status = state.application_status
-                previous_step = state.step
-                state = ConversationState()
-                state.notes["reapplication_previous_status"] = previous_status
-                state.notes["reapplication_previous_step"] = previous_step
-                store.save(chat_id, state)
-                terminal = False
-                reapplication_created = application_created
 
         # A manager and a candidate can both write between two polling cycles.
         # Avito IDs are opaque and same-second ordering is ambiguous, so looking
@@ -253,10 +224,6 @@ def iter_new_chat_messages(
                 if (
                     created is None
                     or created < manual_takeover_after
-                    or (
-                        reapplication_created is not None
-                        and created < reapplication_created
-                    )
                     or (
                         outgoing_key is not None
                         and cursor is not None
@@ -303,13 +270,6 @@ def iter_new_chat_messages(
             if not message_id or store.is_processed(chat_id, message_id):
                 continue
             key = message_key(message)
-            if (
-                reapplication_created is not None
-                and key is not None
-                and key[0] < reapplication_created
-            ):
-                store.mark_message_seen(chat_id, message_id, key[0])
-                continue
             if (
                 only_last_message
                 and message_id != last_message_id
@@ -379,8 +339,9 @@ def iter_new_chat_messages(
                 continue
 
             if message.get("type") == "system":
-                # Avito emits two system events for one vacancy response. Use
-                # only the newest event and only to start a fresh conversation.
+                # Only the actual vacancy response starts a conversation.
+                # Avito's job_apply_enrichment event is emitted when candidate
+                # details are saved/revealed and must never restart the bot.
                 if (
                     message_id != latest_job_application_id
                     or state.step != "idle"
@@ -456,6 +417,49 @@ def iter_unanswered_job_applications(
             continue
         city, item_id = extract_chat_context(chat)
         yield chat_id, state, message, message_id, city, item_id
+
+
+def restore_terminal_reapplications(store: SQLiteStateStore) -> int:
+    """Silence chats that were incorrectly reopened by the old poller.
+
+    The previous implementation recorded the terminal status and step before
+    resetting a chat.  Use those markers once, then remove them so this repair
+    is idempotent and cannot affect ordinary active conversations.
+    """
+    restored = 0
+    terminal_statuses = {"completed", "manual", "cancelled"}
+    terminal_steps = {"done", "manual_takeover"}
+    for chat_id, state in store.all_conversations():
+        previous_status = str(
+            state.notes.get("reapplication_previous_status") or ""
+        ).strip()
+        if previous_status not in terminal_statuses:
+            continue
+        previous_step = str(
+            state.notes.get("reapplication_previous_step") or ""
+        ).strip()
+        if previous_step not in terminal_steps:
+            previous_step = (
+                "manual_takeover" if previous_status == "manual" else "done"
+            )
+
+        state.application_status = previous_status
+        state.step = previous_step
+        state.last_error = None
+        state.next_retry_at = None
+        state.reactivation_sent = False
+        state.reactivation_reply_messages = []
+        state.reactivation_reply_index = 0
+        state.reactivation_reply_trigger_id = None
+        state.reactivation_reply_inflight_at = None
+        state.reactivation_reply_started_at = None
+        stop_reminders(state, permanently=True)
+        state.notes.pop("reapplication_previous_status", None)
+        state.notes.pop("reapplication_previous_step", None)
+        state.notes["terminal_reapplication_restored"] = "true"
+        store.save(chat_id, state)
+        restored += 1
+    return restored
 
 
 def normalized_created(message: dict[str, Any]) -> float | None:
@@ -1640,6 +1644,12 @@ def main() -> None:
     state_path = os.getenv("STATE_DB_PATH", str(Path(PROJECT_ROOT) / "data" / "bot.sqlite3"))
     store = SQLiteStateStore(state_path)
     reminder_config = ReminderConfig.from_env()
+    restored_reapplications = restore_terminal_reapplications(store)
+    if restored_reapplications:
+        print(
+            "Restored terminal state for "
+            f"{restored_reapplications} incorrectly reopened chat(s)"
+        )
     manual_takeover_after = None
     if os.getenv("PAUSE_ON_MANUAL_OUTGOING", "false").strip().lower() == "true":
         manual_takeover_key = "manual_takeover_started_at_v1"

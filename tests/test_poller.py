@@ -19,6 +19,7 @@ from poller import (
     process_chat_message,
     reconcile_incomplete_applications,
     restore_collected_fields,
+    restore_terminal_reapplications,
     schedule_retry,
     send_bot_message,
 )
@@ -277,9 +278,10 @@ def test_new_job_application_system_pair_starts_only_once(tmp_path):
         iter_new_chat_messages(FakeHistoryClient(messages), [candidate_chat], store)
     )
 
-    assert [values[3] for values in yielded] == ["enrichment"]
-    assert is_job_application_system_message(messages[0])
-    assert store.is_processed("chat-1", "job")
+    assert [values[3] for values in yielded] == ["job"]
+    assert not is_job_application_system_message(messages[0])
+    assert is_job_application_system_message(messages[1])
+    assert store.is_processed("chat-1", "enrichment")
     store.close()
 
 
@@ -298,8 +300,8 @@ def test_new_job_application_uses_newest_trigger_when_chat_preview_is_stale(
         iter_new_chat_messages(FakeHistoryClient(messages), [candidate_chat], store)
     )
 
-    assert [values[3] for values in yielded] == ["enrichment"]
-    assert store.is_processed("chat-1", "job")
+    assert [values[3] for values in yielded] == ["job"]
+    assert store.is_processed("chat-1", "enrichment")
     store.close()
 
 
@@ -311,7 +313,7 @@ def test_new_job_application_uses_newest_trigger_when_chat_preview_is_stale(
         ("cancelled", "done"),
     ],
 )
-def test_new_job_application_restarts_terminal_chat_once(
+def test_new_job_application_never_restarts_terminal_chat(
     tmp_path, previous_status, previous_step,
 ):
     store = SQLiteStateStore(tmp_path / "terminal-reapplication.sqlite3")
@@ -344,20 +346,19 @@ def test_new_job_application_restarts_terminal_chat_once(
         iter_new_chat_messages(FakeHistoryClient(messages), [candidate_chat], store)
     )
 
-    assert [values[3] for values in yielded] == ["enrichment"]
-    restarted = yielded[0][1]
-    assert restarted.step == "idle"
-    assert restarted.application_status == "collecting"
-    assert restarted.city is None
-    assert restarted.full_name is None
-    assert restarted.phone is None
-    assert restarted.notes["reapplication_previous_status"] == previous_status
-    assert restarted.notes["reapplication_previous_step"] == previous_step
+    assert yielded == []
+    unchanged = store.load("chat-1")
+    assert unchanged.step == previous_step
+    assert unchanged.application_status == previous_status
+    assert unchanged.city == "Старый город"
+    assert unchanged.full_name == "Старые данные"
+    assert unchanged.phone == "+79990000000"
     assert store.is_processed("chat-1", "job")
+    assert store.is_processed("chat-1", "enrichment")
     store.close()
 
 
-def test_manual_reply_after_terminal_reapplication_still_wins(tmp_path):
+def test_outgoing_after_completed_application_does_not_reopen_chat(tmp_path):
     store = SQLiteStateStore(tmp_path / "terminal-reapplication-manual.sqlite3")
     store.save(
         "chat-1",
@@ -396,11 +397,12 @@ def test_manual_reply_after_terminal_reapplication_still_wins(tmp_path):
 
     assert yielded == []
     state = store.load("chat-1")
-    assert state.step == "manual_takeover"
-    assert state.application_status == "manual"
-    assert state.manual_takeover_message_id == "new-manual"
+    assert state.step == "done"
+    assert state.application_status == "completed"
+    assert state.manual_takeover_message_id is None
     assert store.is_processed("chat-1", "job")
     assert store.is_processed("chat-1", "enrichment")
+    assert store.is_processed("chat-1", "new-manual")
     store.close()
 
 
@@ -446,7 +448,7 @@ def test_unrelated_system_message_is_ignored(tmp_path):
     store.close()
 
 
-def test_recent_unanswered_application_can_be_recovered(tmp_path):
+def test_enrichment_event_alone_is_not_recovered_as_an_application(tmp_path):
     from datetime import datetime, timezone
 
     store = SQLiteStateStore(tmp_path / "recover-system.sqlite3")
@@ -464,7 +466,88 @@ def test_recent_unanswered_application_can_be_recovered(tmp_path):
         )
     )
 
-    assert [values[3] for values in recovered] == ["enrichment"]
+    assert recovered == []
+    store.close()
+
+
+def test_enrichment_after_warehouse_answer_does_not_hide_candidate_reply(tmp_path):
+    store = SQLiteStateStore(tmp_path / "warehouse-answer-enrichment.sqlite3")
+    store.save(
+        "chat-1",
+        ConversationState(
+            step="awaiting_warehouse",
+            application_status="collecting",
+            city="Москва",
+        ),
+    )
+    store.mark_message_seen("chat-1", "warehouse-prompt", 100)
+    candidate_answer = {
+        "id": "candidate-answer",
+        "created": 200,
+        "direction": "in",
+        "type": "text",
+        "content": {"text": "4"},
+    }
+    enrichment = job_application_message(
+        "enrichment", 201, "job_apply_enrichment"
+    )
+    candidate_chat = chat()
+    candidate_chat["last_message"] = enrichment
+
+    yielded = list(
+        iter_new_chat_messages(
+            FakeHistoryClient([candidate_answer, enrichment]),
+            [candidate_chat],
+            store,
+        )
+    )
+
+    assert [values[3] for values in yielded] == ["candidate-answer"]
+    assert store.is_processed("chat-1", "enrichment")
+    assert not store.is_processed("chat-1", "candidate-answer")
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("previous_status", "previous_step"),
+    [
+        ("completed", "done"),
+        ("manual", "manual_takeover"),
+        ("cancelled", "done"),
+    ],
+)
+def test_restore_terminal_reapplications_is_idempotent(
+    tmp_path, previous_status, previous_step,
+):
+    store = SQLiteStateStore(tmp_path / "restore-reapplications.sqlite3")
+    state = ConversationState(
+        step="awaiting_phone",
+        application_status="collecting",
+        reminder_due_at="2026-09-11T00:00:00+00:00",
+        reactivation_sent=True,
+        reactivation_reply_messages=["duplicate"],
+        last_error="temporary error",
+        next_retry_at="2026-09-11T00:00:00+00:00",
+    )
+    state.notes["reapplication_previous_status"] = previous_status
+    state.notes["reapplication_previous_step"] = previous_step
+    store.save("chat-1", state)
+
+    assert restore_terminal_reapplications(store) == 1
+    assert restore_terminal_reapplications(store) == 0
+
+    restored = store.load("chat-1")
+    assert restored.application_status == previous_status
+    assert restored.step == previous_step
+    assert restored.reminders_stopped
+    assert restored.reminder_due_at is None
+    assert not restored.reactivation_sent
+    assert restored.reactivation_reply_messages == []
+    assert restored.last_error is None
+    assert restored.next_retry_at is None
+    assert "reapplication_previous_status" not in restored.notes
+    assert "reapplication_previous_step" not in restored.notes
+    assert restored.notes["terminal_reapplication_restored"] == "true"
     store.close()
 
 
