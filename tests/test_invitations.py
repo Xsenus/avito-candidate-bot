@@ -135,6 +135,20 @@ def test_explicit_location_time_requires_time_in_template():
         )
 
 
+def test_explicit_location_time_fills_blank_time_in_template():
+    catalog = InvitationCatalog.from_csv(
+        '"СЦ","Текст сообщения"\n'
+        '"Набережные Челны","Стажировка начинается в по адресу ДАТА"\n'
+    )
+
+    invitation = catalog.find("Набережные Челны").render(
+        "28.07.2026",
+        internship_time="10:00:00",
+    )
+
+    assert "Стажировка начинается в 10:00:00 по адресу" in invitation
+
+
 def test_explicit_location_time_requires_hh_mm_ss_format():
     catalog = InvitationCatalog.from_csv(
         '"СЦ","Текст сообщения"\n'

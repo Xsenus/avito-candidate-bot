@@ -20,7 +20,7 @@ DATE_MARKER = "ДАТА"
 AVITO_TEXT_LIMIT = 1000
 INTERNSHIP_START_TIME_PATTERN = re.compile(
     r"(?P<prefix>стажировка\s+начинается\s+в\s+)"
-    r"\d{1,2}:\d{2}(?::\d{2})?",
+    r"(?P<current_time>\d{1,2}:\d{2}(?::\d{2})?)?",
     re.IGNORECASE,
 )
 DEFAULT_INVITATION_FOOTER = """Что взять с собой:
@@ -241,7 +241,11 @@ def replace_invitation_time(
             f"{internship_time!r}"
         )
     rendered, replacements = INTERNSHIP_START_TIME_PATTERN.subn(
-        lambda match: f"{match.group('prefix')}{start_time}",
+        lambda match: (
+            f"{match.group('prefix')}{start_time}"
+            if match.group("current_time")
+            else f"{match.group('prefix')}{start_time} "
+        ),
         text,
         count=1,
     )
