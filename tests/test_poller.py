@@ -665,6 +665,82 @@ class FakeHistoryClient:
         return self.messages
 
 
+class PerChatHistoryClient:
+    def __init__(self, histories, failures=None):
+        self.histories = histories
+        self.failures = failures or {}
+
+    def get_messages(self, chat_id, *, limit=100):
+        if chat_id in self.failures:
+            error = RuntimeError(f"HTTP {self.failures[chat_id]}")
+            error.response = type(
+                "Response", (), {"status_code": self.failures[chat_id]}
+            )()
+            raise error
+        return self.histories[chat_id]
+
+
+def chat_with_message(chat_id, message_id, text, created):
+    value = chat()
+    value["id"] = chat_id
+    value["last_message"] = {
+        "id": message_id,
+        "created": created,
+        "direction": "in",
+        "type": "text",
+        "content": {"text": text},
+    }
+    return value
+
+
+def test_per_chat_http_402_does_not_block_other_incoming_messages(tmp_path):
+    blocked = chat_with_message("blocked", "blocked-message", "служебное", 100)
+    healthy = chat_with_message("healthy", "healthy-message", "4", 200)
+    client = PerChatHistoryClient(
+        {"healthy": [healthy["last_message"]]},
+        failures={"blocked": 402},
+    )
+    store = SQLiteStateStore(tmp_path / "per-chat-402.sqlite3")
+
+    yielded = list(iter_new_chat_messages(client, [blocked, healthy], store))
+
+    assert [values[0] for values in yielded] == ["healthy"]
+    assert [values[3] for values in yielded] == ["healthy-message"]
+    assert store.is_processed("blocked", "blocked-message")
+    store.close()
+
+
+def test_bootstrap_and_migration_skip_only_http_402_chat(tmp_path):
+    blocked = chat_with_message("blocked", "blocked-message", "служебное", 100)
+    healthy = chat_with_message("healthy", "healthy-message", "ответ", 200)
+    client = PerChatHistoryClient(
+        {"healthy": [healthy["last_message"]]},
+        failures={"blocked": 402},
+    )
+    store = SQLiteStateStore(tmp_path / "bootstrap-402.sqlite3")
+
+    initialize_message_cursor(client, store, [blocked, healthy])
+    assert migrate_legacy_completed_chats(client, store, [blocked, healthy]) == 0
+
+    assert store.get_metadata("message_history_cursor_initialized_v2") == "true"
+    assert store.get_metadata("legacy_completed_chats_migrated_v1") == "true"
+    assert store.is_processed("blocked", "blocked-message")
+    assert store.is_processed("healthy", "healthy-message")
+    store.close()
+
+
+def test_non_402_history_failure_still_reaches_retry_loop(tmp_path):
+    failed = chat_with_message("failed", "failed-message", "ответ", 100)
+    client = PerChatHistoryClient({}, failures={"failed": 500})
+    store = SQLiteStateStore(tmp_path / "per-chat-500.sqlite3")
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        list(iter_new_chat_messages(client, [failed], store))
+
+    assert not store.is_processed("failed", "failed-message")
+    store.close()
+
+
 def test_rapid_name_and_phone_messages_are_yielded_oldest_first(tmp_path):
     store = SQLiteStateStore(tmp_path / "rapid.sqlite3")
     store.save("chat-1", ConversationState(step="awaiting_full_name"))

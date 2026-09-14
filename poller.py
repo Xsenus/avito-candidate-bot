@@ -98,6 +98,31 @@ def is_job_application_system_message(message: dict[str, Any]) -> bool:
     )
 
 
+def get_chat_messages_if_available(
+    client: AvitoClient,
+    chat_id: str,
+    *,
+    limit: int,
+) -> list[dict[str, Any]] | None:
+    """Return history while isolating Avito's per-chat HTTP 402 response.
+
+    Some accounts expose a chat in the chat list but return Payment Required
+    for that individual history. One such chat must not abort polling for the
+    rest of the account. Other failures still reach the normal retry loop.
+    """
+    try:
+        return client.get_messages(chat_id, limit=limit)
+    except Exception as exc:  # noqa: BLE001 - inspect HTTP status generically
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) != 402:
+            raise
+        print(
+            "WARNING: skipped chat history unavailable through Avito API "
+            "status=402"
+        )
+        return None
+
+
 def iter_new_chat_messages(
     client: AvitoClient,
     chats: list[dict[str, Any]],
@@ -119,7 +144,17 @@ def iter_new_chat_messages(
 
         city, item_id = extract_chat_context(chat)
         state = store.load(chat_id)
-        messages = oldest_first(client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT))
+        history = get_chat_messages_if_available(
+            client, chat_id, limit=CHAT_PAGE_LIMIT
+        )
+        if history is None:
+            store.mark_message_seen(
+                chat_id,
+                last_message_id,
+                normalized_created(last_message),
+            )
+            continue
+        messages = oldest_first(history)
         latest_job_application = next(
             (
                 message
@@ -388,7 +423,20 @@ def iter_unanswered_job_applications(
         if state.step != "idle" or state.application_status != "collecting":
             continue
 
-        messages = oldest_first(client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT))
+        history = get_chat_messages_if_available(
+            client, chat_id, limit=CHAT_PAGE_LIMIT
+        )
+        if history is None:
+            last_message = chat.get("last_message") or {}
+            last_message_id = str(last_message.get("id") or "").strip()
+            if last_message_id:
+                store.mark_message_seen(
+                    chat_id,
+                    last_message_id,
+                    normalized_created(last_message),
+                )
+            continue
+        messages = oldest_first(history)
         triggers = [
             message
             for message in messages
@@ -1033,7 +1081,19 @@ def initialize_message_cursor(
             chat_id = str(chat.get("id") or "").strip()
             if not chat_id:
                 continue
-            messages = oldest_first(client.get_messages(chat_id, limit=100))
+            history = get_chat_messages_if_available(client, chat_id, limit=100)
+            if history is None:
+                last_message = chat.get("last_message") or {}
+                last_message_id = str(last_message.get("id") or "").strip()
+                if last_message_id:
+                    store.mark_message_seen(
+                        chat_id,
+                        last_message_id,
+                        normalized_created(last_message),
+                    )
+                    count += 1
+                continue
+            messages = oldest_first(history)
             state = store.load(chat_id)
             prompt_index = None
             inferred_step = None
@@ -1127,7 +1187,10 @@ def migrate_legacy_completed_chats(
         if state.application_status == "completed" or state.step == "done":
             continue
         latest_step = None
-        for message in oldest_first(client.get_messages(chat_id, limit=100)):
+        history = get_chat_messages_if_available(client, chat_id, limit=100)
+        if history is None:
+            continue
+        for message in oldest_first(history):
             if message.get("direction") != "out" or message.get("type") != "text":
                 continue
             content = message.get("content") or {}
@@ -1189,7 +1252,10 @@ def reconcile_incomplete_applications(
         missing = missing_application_fields(state)
         if not missing:
             continue
-        restore_collected_fields(state, client.get_messages(chat_id, limit=100))
+        history = get_chat_messages_if_available(client, chat_id, limit=100)
+        if history is None:
+            continue
+        restore_collected_fields(state, history)
         missing = missing_application_fields(state)
         if not missing:
             state.last_error = None
