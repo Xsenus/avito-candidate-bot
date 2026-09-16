@@ -78,6 +78,50 @@ class SQLiteStateStore:
             )
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS archived_processed_messages (
+                account_fingerprint TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                processed_at TEXT NOT NULL,
+                PRIMARY KEY(account_fingerprint, chat_id, message_id)
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS archived_chat_message_cursors (
+                account_fingerprint TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                last_created REAL NOT NULL,
+                last_message_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(account_fingerprint, chat_id)
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS archived_bot_outgoing_messages (
+                account_fingerprint TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY(account_fingerprint, chat_id, message_id)
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS archived_account_metadata (
+                account_fingerprint TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY(account_fingerprint, key)
+            )
+            """
+        )
         self._connection.commit()
 
     def load(self, chat_id: str) -> ConversationState:
@@ -296,14 +340,15 @@ class SQLiteStateStore:
             )
             self._connection.commit()
 
-    def bind_account(self, account_fingerprint: str) -> tuple[bool, int]:
-        """Bind state to one Avito account and archive data after a switch.
+    def bind_account(self, account_fingerprint: str) -> tuple[bool, int, int]:
+        """Bind state to one Avito account and swap account-local snapshots.
 
         The fingerprint must be a one-way digest rather than a credential or
         raw account ID. The first binding preserves existing state for safe
-        upgrades. A later mismatch archives all conversations and resets every
-        account-local cursor so the new account starts without touching chats
-        from the previous profile.
+        upgrades. A later mismatch snapshots the current account, clears the
+        active tables, and restores the target account when it has been used
+        before. This allows safe switching in both directions without mixing
+        histories.
         """
         fingerprint = str(account_fingerprint or "").strip()
         if not fingerprint:
@@ -328,9 +373,9 @@ class SQLiteStateStore:
                     (binding_key, fingerprint),
                 )
                 self._connection.commit()
-                return False, 0
+                return False, 0, 0
             if previous == fingerprint:
-                return False, 0
+                return False, 0, 0
 
             archived = int(
                 self._connection.execute(
@@ -339,6 +384,10 @@ class SQLiteStateStore:
             )
             self._connection.execute("BEGIN IMMEDIATE")
             try:
+                self._connection.execute(
+                    "DELETE FROM archived_conversations WHERE account_fingerprint = ?",
+                    (previous,),
+                )
                 self._connection.execute(
                     """
                     INSERT INTO archived_conversations(
@@ -352,24 +401,144 @@ class SQLiteStateStore:
                     """,
                     (previous,),
                 )
+                self._connection.execute(
+                    "DELETE FROM archived_processed_messages WHERE account_fingerprint = ?",
+                    (previous,),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO archived_processed_messages(
+                        account_fingerprint, chat_id, message_id, processed_at
+                    )
+                    SELECT ?, chat_id, message_id, processed_at
+                    FROM processed_messages
+                    """,
+                    (previous,),
+                )
+                self._connection.execute(
+                    "DELETE FROM archived_chat_message_cursors WHERE account_fingerprint = ?",
+                    (previous,),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO archived_chat_message_cursors(
+                        account_fingerprint,
+                        chat_id,
+                        last_created,
+                        last_message_id,
+                        updated_at
+                    )
+                    SELECT ?, chat_id, last_created, last_message_id, updated_at
+                    FROM chat_message_cursors
+                    """,
+                    (previous,),
+                )
+                self._connection.execute(
+                    "DELETE FROM archived_bot_outgoing_messages WHERE account_fingerprint = ?",
+                    (previous,),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO archived_bot_outgoing_messages(
+                        account_fingerprint, chat_id, message_id, recorded_at
+                    )
+                    SELECT ?, chat_id, message_id, recorded_at
+                    FROM bot_outgoing_messages
+                    """,
+                    (previous,),
+                )
+                self._connection.execute(
+                    "DELETE FROM archived_account_metadata WHERE account_fingerprint = ?",
+                    (previous,),
+                )
+                placeholders = ",".join("?" for _ in account_metadata)
+                self._connection.execute(
+                    f"""
+                    INSERT INTO archived_account_metadata(
+                        account_fingerprint, key, value
+                    )
+                    SELECT ?, key, value
+                    FROM metadata
+                    WHERE key IN ({placeholders})
+                    """,
+                    (previous, *account_metadata),
+                )
                 self._connection.execute("DELETE FROM conversations")
                 self._connection.execute("DELETE FROM processed_messages")
                 self._connection.execute("DELETE FROM chat_message_cursors")
                 self._connection.execute("DELETE FROM bot_outgoing_messages")
-                placeholders = ",".join("?" for _ in account_metadata)
                 self._connection.execute(
                     f"DELETE FROM metadata WHERE key IN ({placeholders})",
                     account_metadata,
                 )
                 self._connection.execute(
+                    """
+                    INSERT INTO conversations(chat_id, state_json, updated_at)
+                    SELECT current.chat_id, current.state_json, current.original_updated_at
+                    FROM archived_conversations AS current
+                    INNER JOIN (
+                        SELECT chat_id, MAX(id) AS latest_id
+                        FROM archived_conversations
+                        WHERE account_fingerprint = ?
+                        GROUP BY chat_id
+                    ) AS latest ON latest.latest_id = current.id
+                    """,
+                    (fingerprint,),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO processed_messages(chat_id, message_id, processed_at)
+                    SELECT chat_id, message_id, processed_at
+                    FROM archived_processed_messages
+                    WHERE account_fingerprint = ?
+                    """,
+                    (fingerprint,),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO chat_message_cursors(
+                        chat_id, last_created, last_message_id, updated_at
+                    )
+                    SELECT chat_id, last_created, last_message_id, updated_at
+                    FROM archived_chat_message_cursors
+                    WHERE account_fingerprint = ?
+                    """,
+                    (fingerprint,),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO bot_outgoing_messages(
+                        chat_id, message_id, recorded_at
+                    )
+                    SELECT chat_id, message_id, recorded_at
+                    FROM archived_bot_outgoing_messages
+                    WHERE account_fingerprint = ?
+                    """,
+                    (fingerprint,),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO metadata(key, value)
+                    SELECT key, value
+                    FROM archived_account_metadata
+                    WHERE account_fingerprint = ?
+                    """,
+                    (fingerprint,),
+                )
+                self._connection.execute(
                     "UPDATE metadata SET value = ? WHERE key = ?",
                     (fingerprint, binding_key),
+                )
+                restored = int(
+                    self._connection.execute(
+                        "SELECT COUNT(*) FROM conversations"
+                    ).fetchone()[0]
                 )
                 self._connection.commit()
             except Exception:
                 self._connection.rollback()
                 raise
-            return True, archived
+            return True, archived, restored
 
     def close(self) -> None:
         with self._lock:

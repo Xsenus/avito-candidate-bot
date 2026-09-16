@@ -1744,13 +1744,14 @@ def main() -> None:
     )
     state_path = os.getenv("STATE_DB_PATH", str(Path(PROJECT_ROOT) / "data" / "bot.sqlite3"))
     store = SQLiteStateStore(state_path)
-    switched_account, archived_conversations = store.bind_account(
+    switched_account, archived_conversations, restored_conversations = store.bind_account(
         account_fingerprint(os.getenv("AVITO_USER_ID", ""))
     )
     if switched_account:
         print(
             "Avito account change detected; archived previous account state "
-            f"conversations={archived_conversations}"
+            f"conversations={archived_conversations} "
+            f"restored_target_conversations={restored_conversations}"
         )
     reminder_config = ReminderConfig.from_env()
     restored_reapplications = restore_terminal_reapplications(store)

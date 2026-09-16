@@ -69,7 +69,7 @@ def test_all_conversations_returns_persisted_states(tmp_path):
     store.close()
 
 
-def test_account_binding_preserves_first_account_and_archives_on_switch(tmp_path):
+def test_account_binding_restores_each_account_snapshot_on_return(tmp_path):
     store = SQLiteStateStore(tmp_path / "account-switch.sqlite3")
     store.save(
         "old-chat",
@@ -84,24 +84,61 @@ def test_account_binding_preserves_first_account_and_archives_on_switch(tmp_path
     store.set_metadata("message_history_cursor_initialized_v2", "true")
     store.set_metadata("unanswered_recovery_started_at_v1", "1")
 
-    assert store.bind_account("account-a") == (False, 0)
+    assert store.bind_account("account-a") == (False, 0, 0)
     assert store.load("old-chat").step == "awaiting_datetime"
-    assert store.bind_account("account-a") == (False, 0)
+    assert store.bind_account("account-a") == (False, 0, 0)
 
-    assert store.bind_account("account-b") == (True, 1)
+    assert store.bind_account("account-b") == (True, 1, 0)
     assert store.all_conversations() == []
     assert not store.is_processed("old-chat", "incoming-1")
     assert not store.is_bot_outgoing("old-chat", "outgoing-1")
     assert store.get_message_cursor("old-chat") is None
     assert store.get_metadata("message_history_cursor_initialized_v2") is None
     assert store.get_metadata("unanswered_recovery_started_at_v1") is None
+
+    store.save(
+        "new-chat",
+        ConversationState(step="awaiting_phone", application_status="collecting"),
+    )
+    store.mark_message_seen("new-chat", "incoming-2", 2.0)
+    store.mark_bot_outgoing("new-chat", "outgoing-2")
+    store.set_metadata("message_history_cursor_initialized_v2", "account-b-ready")
+    store.set_metadata("manual_takeover_started_at_v1", "2")
+
+    assert store.bind_account("account-a") == (True, 1, 1)
+    assert store.load("old-chat").step == "awaiting_datetime"
+    assert store.is_processed("old-chat", "incoming-1")
+    assert store.is_bot_outgoing("old-chat", "outgoing-1")
+    assert store.get_message_cursor("old-chat") == (1.0, "incoming-1")
+    assert store.get_metadata("message_history_cursor_initialized_v2") == "true"
+    assert store.get_metadata("unanswered_recovery_started_at_v1") == "1"
+    assert not store.is_processed("new-chat", "incoming-2")
+    assert store.get_metadata("manual_takeover_started_at_v1") is None
+
+    assert store.bind_account("account-b") == (True, 1, 1)
+    assert store.load("new-chat").step == "awaiting_phone"
+    assert store.is_processed("new-chat", "incoming-2")
+    assert store.is_bot_outgoing("new-chat", "outgoing-2")
+    assert store.get_message_cursor("new-chat") == (2.0, "incoming-2")
+    assert (
+        store.get_metadata("message_history_cursor_initialized_v2")
+        == "account-b-ready"
+    )
+    assert store.get_metadata("manual_takeover_started_at_v1") == "2"
+    assert not store.is_processed("old-chat", "incoming-1")
+    assert store.get_metadata("unanswered_recovery_started_at_v1") is None
+
     archived = store._connection.execute(
         """
         SELECT account_fingerprint, chat_id
         FROM archived_conversations
+        ORDER BY account_fingerprint, chat_id
         """
     ).fetchall()
-    assert archived == [("account-a", "old-chat")]
+    assert archived == [
+        ("account-a", "old-chat"),
+        ("account-b", "new-chat"),
+    ]
     store.close()
 
 
