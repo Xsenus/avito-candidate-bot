@@ -589,11 +589,11 @@ def test_missing_chat_permanently_stops_its_reminders(tmp_path):
     store.save("old-account-chat", state)
 
     class MissingChatError(RuntimeError):
-        response = type("Response", (), {"status_code": 404})()
+        pass
 
     class MissingChatClient(ReminderClient):
         def get_messages(self, chat_id, *, limit):
-            raise MissingChatError("not found")
+            raise MissingChatError("404 Client Error: Not Found")
 
     assert process_due_reminders(
         MissingChatClient(due), store, settings, now=due

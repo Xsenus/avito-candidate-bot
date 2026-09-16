@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sys
 import time
 from collections.abc import Iterator
@@ -103,6 +104,15 @@ def account_fingerprint(user_id: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def http_error_status(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    match = re.search(r"\b([1-5]\d{2})\s+Client Error\b", str(exc))
+    return int(match.group(1)) if match else None
+
+
 def is_job_application_system_message(message: dict[str, Any]) -> bool:
     """Return whether Avito is announcing a new vacancy application."""
     if message.get("direction") != "in" or message.get("type") != "system":
@@ -129,8 +139,7 @@ def get_chat_messages_if_available(
     try:
         return client.get_messages(chat_id, limit=limit)
     except Exception as exc:  # noqa: BLE001 - inspect HTTP status generically
-        response = getattr(exc, "response", None)
-        if getattr(response, "status_code", None) != 402:
+        if http_error_status(exc) != 402:
             raise
         print(
             "WARNING: skipped chat history unavailable through Avito API "
@@ -686,8 +695,7 @@ def process_due_reminders(
         try:
             messages = client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT)
         except Exception as exc:  # noqa: BLE001 - isolate one chat/API failure
-            response = getattr(exc, "response", None)
-            status_code = getattr(response, "status_code", None)
+            status_code = http_error_status(exc)
             if status_code in {402, 404}:
                 stop_reminders(state, permanently=True)
                 state.notes["reminder_history_unavailable"] = str(status_code)

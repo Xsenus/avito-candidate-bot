@@ -45,6 +45,17 @@ def test_env_file_signature_detects_content_change(tmp_path):
     assert poller_module.env_file_signature(env_file) != first
 
 
+def test_http_error_status_supports_response_and_text_fallback():
+    structured = RuntimeError("request failed")
+    structured.response = type("Response", (), {"status_code": 402})()
+
+    assert poller_module.http_error_status(structured) == 402
+    assert poller_module.http_error_status(
+        RuntimeError("404 Client Error: Not Found")
+    ) == 404
+    assert poller_module.http_error_status(RuntimeError("timeout")) is None
+
+
 def test_main_retries_transient_avito_failure_without_exiting(
     tmp_path, monkeypatch, capsys
 ):
