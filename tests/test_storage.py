@@ -1,3 +1,5 @@
+import pytest
+
 from avito_bot.conversation import ConversationState
 from avito_bot.storage import SQLiteStateStore
 
@@ -65,3 +67,48 @@ def test_all_conversations_returns_persisted_states(tmp_path):
     assert conversations["chat-1"].step == "awaiting_phone"
     assert conversations["chat-2"].application_status == "completed"
     store.close()
+
+
+def test_account_binding_preserves_first_account_and_archives_on_switch(tmp_path):
+    store = SQLiteStateStore(tmp_path / "account-switch.sqlite3")
+    store.save(
+        "old-chat",
+        ConversationState(
+            step="awaiting_datetime",
+            application_status="collecting",
+            reminder_due_at="2026-09-16T10:00:00+00:00",
+        ),
+    )
+    store.mark_message_seen("old-chat", "incoming-1", 1.0)
+    store.mark_bot_outgoing("old-chat", "outgoing-1")
+    store.set_metadata("message_history_cursor_initialized_v2", "true")
+    store.set_metadata("unanswered_recovery_started_at_v1", "1")
+
+    assert store.bind_account("account-a") == (False, 0)
+    assert store.load("old-chat").step == "awaiting_datetime"
+    assert store.bind_account("account-a") == (False, 0)
+
+    assert store.bind_account("account-b") == (True, 1)
+    assert store.all_conversations() == []
+    assert not store.is_processed("old-chat", "incoming-1")
+    assert not store.is_bot_outgoing("old-chat", "outgoing-1")
+    assert store.get_message_cursor("old-chat") is None
+    assert store.get_metadata("message_history_cursor_initialized_v2") is None
+    assert store.get_metadata("unanswered_recovery_started_at_v1") is None
+    archived = store._connection.execute(
+        """
+        SELECT account_fingerprint, chat_id
+        FROM archived_conversations
+        """
+    ).fetchall()
+    assert archived == [("account-a", "old-chat")]
+    store.close()
+
+
+def test_account_binding_rejects_empty_fingerprint(tmp_path):
+    store = SQLiteStateStore(tmp_path / "empty-account.sqlite3")
+    try:
+        with pytest.raises(ValueError, match="fingerprint"):
+            store.bind_account("  ")
+    finally:
+        store.close()

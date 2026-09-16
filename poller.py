@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import time
@@ -85,6 +86,21 @@ load_dotenv()
 
 CHAT_PAGE_LIMIT = 100
 JOB_APPLICATION_FLOW_IDS = frozenset({"job"})
+
+
+def env_file_signature(path: str | Path) -> tuple[int, int] | None:
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+def account_fingerprint(user_id: str) -> str:
+    normalized = str(user_id or "").strip()
+    if not normalized:
+        raise ValueError("AVITO_USER_ID is required")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def is_job_application_system_message(message: dict[str, Any]) -> bool:
@@ -670,6 +686,17 @@ def process_due_reminders(
         try:
             messages = client.get_messages(chat_id, limit=CHAT_PAGE_LIMIT)
         except Exception as exc:  # noqa: BLE001 - isolate one chat/API failure
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+            if status_code in {402, 404}:
+                stop_reminders(state, permanently=True)
+                state.notes["reminder_history_unavailable"] = str(status_code)
+                store.save(chat_id, state)
+                print(
+                    "reminders stopped because chat history is unavailable "
+                    f"chat_id={chat_id} status={status_code}"
+                )
+                continue
             print(f"reminder verification error chat_id={chat_id}: {exc}")
             continue
 
@@ -1709,6 +1736,14 @@ def main() -> None:
     )
     state_path = os.getenv("STATE_DB_PATH", str(Path(PROJECT_ROOT) / "data" / "bot.sqlite3"))
     store = SQLiteStateStore(state_path)
+    switched_account, archived_conversations = store.bind_account(
+        account_fingerprint(os.getenv("AVITO_USER_ID", ""))
+    )
+    if switched_account:
+        print(
+            "Avito account change detected; archived previous account state "
+            f"conversations={archived_conversations}"
+        )
     reminder_config = ReminderConfig.from_env()
     restored_reapplications = restore_terminal_reapplications(store)
     if restored_reapplications:
@@ -1867,6 +1902,8 @@ def main() -> None:
     except Exception as exc:
         print(f"WARNING: initial Avito auth failed; polling will retry: {exc}")
 
+    env_path = Path(PROJECT_ROOT) / ".env"
+    startup_env_signature = env_file_signature(env_path)
     startup_initialization_pending = True
     consecutive_poll_errors = 0
     processed_since_health = 0
@@ -1875,6 +1912,9 @@ def main() -> None:
     )
     next_health_log = time.monotonic() + health_interval
     while True:
+        if env_file_signature(env_path) != startup_env_signature:
+            print("Environment file changed; restarting to apply new settings")
+            return
         if time.monotonic() >= regional_provider.next_refresh_at:
             if regional_provider.refresh_if_due():
                 regional_locations = regional_provider.catalog

@@ -25,6 +25,26 @@ from poller import (
 )
 
 
+def test_account_fingerprint_is_stable_and_does_not_store_raw_user_id():
+    fingerprint = poller_module.account_fingerprint(" 442976310 ")
+
+    assert fingerprint == poller_module.account_fingerprint("442976310")
+    assert fingerprint != "442976310"
+    assert len(fingerprint) == 64
+
+
+def test_env_file_signature_detects_content_change(tmp_path):
+    env_file = tmp_path / ".env"
+    assert poller_module.env_file_signature(env_file) is None
+
+    env_file.write_text("AVITO_USER_ID=1\n", encoding="utf-8")
+    first = poller_module.env_file_signature(env_file)
+    env_file.write_text("AVITO_USER_ID=22\n", encoding="utf-8")
+
+    assert first is not None
+    assert poller_module.env_file_signature(env_file) != first
+
+
 def test_main_retries_transient_avito_failure_without_exiting(
     tmp_path, monkeypatch, capsys
 ):

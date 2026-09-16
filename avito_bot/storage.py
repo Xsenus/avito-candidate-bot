@@ -66,6 +66,18 @@ class SQLiteStateStore:
             )
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS archived_conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_fingerprint TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                original_updated_at TEXT NOT NULL,
+                archived_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         self._connection.commit()
 
     def load(self, chat_id: str) -> ConversationState:
@@ -283,6 +295,81 @@ class SQLiteStateStore:
                 (key, value),
             )
             self._connection.commit()
+
+    def bind_account(self, account_fingerprint: str) -> tuple[bool, int]:
+        """Bind state to one Avito account and archive data after a switch.
+
+        The fingerprint must be a one-way digest rather than a credential or
+        raw account ID. The first binding preserves existing state for safe
+        upgrades. A later mismatch archives all conversations and resets every
+        account-local cursor so the new account starts without touching chats
+        from the previous profile.
+        """
+        fingerprint = str(account_fingerprint or "").strip()
+        if not fingerprint:
+            raise ValueError("Account fingerprint is required")
+
+        binding_key = "avito_account_fingerprint_v1"
+        account_metadata = (
+            "message_history_cursor_initialized_v2",
+            "legacy_completed_chats_migrated_v1",
+            "unanswered_recovery_started_at_v1",
+            "manual_takeover_started_at_v1",
+            "reminder_manual_stop_started_at_v1",
+        )
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM metadata WHERE key = ?", (binding_key,)
+            ).fetchone()
+            previous = str(row[0]).strip() if row else None
+            if previous is None:
+                self._connection.execute(
+                    "INSERT INTO metadata(key, value) VALUES (?, ?)",
+                    (binding_key, fingerprint),
+                )
+                self._connection.commit()
+                return False, 0
+            if previous == fingerprint:
+                return False, 0
+
+            archived = int(
+                self._connection.execute(
+                    "SELECT COUNT(*) FROM conversations"
+                ).fetchone()[0]
+            )
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO archived_conversations(
+                        account_fingerprint,
+                        chat_id,
+                        state_json,
+                        original_updated_at
+                    )
+                    SELECT ?, chat_id, state_json, updated_at
+                    FROM conversations
+                    """,
+                    (previous,),
+                )
+                self._connection.execute("DELETE FROM conversations")
+                self._connection.execute("DELETE FROM processed_messages")
+                self._connection.execute("DELETE FROM chat_message_cursors")
+                self._connection.execute("DELETE FROM bot_outgoing_messages")
+                placeholders = ",".join("?" for _ in account_metadata)
+                self._connection.execute(
+                    f"DELETE FROM metadata WHERE key IN ({placeholders})",
+                    account_metadata,
+                )
+                self._connection.execute(
+                    "UPDATE metadata SET value = ? WHERE key = ?",
+                    (fingerprint, binding_key),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+            return True, archived
 
     def close(self) -> None:
         with self._lock:

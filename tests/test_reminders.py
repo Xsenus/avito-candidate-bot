@@ -579,6 +579,32 @@ def test_history_failure_for_one_chat_does_not_block_other_due_reminders(
     store.close()
 
 
+def test_missing_chat_permanently_stops_its_reminders(tmp_path):
+    settings = config(1, 2, 3)
+    started = datetime(2026, 9, 3, 5, 0, tzinfo=UTC)
+    due = started + timedelta(seconds=1)
+    store = SQLiteStateStore(tmp_path / "missing-chat.sqlite3")
+    state = ConversationState(step="awaiting_datetime")
+    arm_reminders(state, settings, now=started)
+    store.save("old-account-chat", state)
+
+    class MissingChatError(RuntimeError):
+        response = type("Response", (), {"status_code": 404})()
+
+    class MissingChatClient(ReminderClient):
+        def get_messages(self, chat_id, *, limit):
+            raise MissingChatError("not found")
+
+    assert process_due_reminders(
+        MissingChatClient(due), store, settings, now=due
+    ) == 0
+    restored = store.load("old-account-chat")
+    assert restored.reminders_stopped
+    assert restored.reminder_due_at is None
+    assert restored.notes["reminder_history_unavailable"] == "404"
+    store.close()
+
+
 def test_processed_candidate_message_does_not_cancel_new_series_on_clock_skew(
     tmp_path,
 ):
