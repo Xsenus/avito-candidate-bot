@@ -1,4 +1,15 @@
 from pathlib import Path
+from datetime import date
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def fixed_calendar(monkeypatch):
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 7, 20)
+    monkeypatch.setattr("avito_bot.candidate.date", FixedDate)
 
 from avito_bot.conversation import ConversationState
 from avito_bot.invitations import InvitationCatalog

@@ -32,6 +32,28 @@ NON_NAME_WORDS = {
 DATE_INPUT_ERROR_MESSAGE = "Укажите день недели или дату в формате ДД.ММ.ГГГГ"
 
 
+class InternshipDateError(ValueError):
+    """A recognizable date cannot be used in the form's calendar."""
+
+
+def validate_internship_date(value: str, *, today: date | None = None) -> date:
+    """Reject past dates and years outside the form's 24-month calendar."""
+    base = today or date.today()
+    try:
+        parsed = _parse_date(value, "%d.%m.%Y")
+    except ValueError:
+        raise InternshipDateError(DATE_INPUT_ERROR_MESSAGE) from None
+    if parsed < base:
+        raise InternshipDateError("Эта дата уже прошла. Укажите новый день стажировки.")
+    months_ahead = (parsed.year - base.year) * 12 + parsed.month - base.month
+    if months_ahead > 24:
+        raise InternshipDateError(
+            "Проверьте год: дата стажировки должна быть в пределах ближайших "
+            "24 месяцев. Укажите день недели или дату в формате ДД.ММ.ГГГГ."
+        )
+    return parsed
+
+
 def split_full_name(value: str) -> tuple[str, str]:
     """Return surname and first name from the candidate's answer."""
     raw = (value or "").strip()
@@ -97,12 +119,14 @@ def resolve_internship_date(value: str, *, today: date | None = None) -> date:
             parsed = date.fromisoformat(
                 "-".join(reversed(re.split(r"[./-]", cleaned)))
             ) if fmt == "%d.%m.%Y" else _parse_date(cleaned, fmt)
-            if parsed < base:
-                raise ValueError("Указанная дата уже прошла")
-            return parsed
+            return validate_internship_date(parsed.strftime("%d.%m.%Y"), today=base)
+        except InternshipDateError:
+            raise
         except ValueError:
             continue
 
+    if re.fullmatch(r"\d{1,2}[./-]\d{1,2}[./-]\d{4}", cleaned):
+        raise InternshipDateError(DATE_INPUT_ERROR_MESSAGE)
     raise ValueError(DATE_INPUT_ERROR_MESSAGE)
 
 

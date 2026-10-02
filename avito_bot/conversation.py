@@ -9,6 +9,7 @@ from typing import Any
 from .avito_client import AvitoClient
 from .candidate import (
     DATE_INPUT_ERROR_MESSAGE,
+    InternshipDateError,
     normalize_phone,
     resolve_internship_date,
     split_full_name,
@@ -362,6 +363,8 @@ def handle_user_message(
     if state.step == "awaiting_datetime":
         try:
             state.internship_date = resolve_internship_date(text).strftime("%d.%m.%Y")
+        except InternshipDateError as exc:
+            return str(exc)
         except ValueError:
             if not operator_handoff_enabled:
                 return _repeat_current_question(state)
@@ -369,6 +372,14 @@ def handle_user_message(
             state.step = "awaiting_call"
             return MORE_INFO_MESSAGE
         state.date_time = text.strip()
+        if state.notes.pop("date_correction_required", None):
+            if state.last_name and state.first_name and state.phone:
+                state.step = "ready_to_submit"
+                state.application_status = "pending"
+                return ""
+            if state.last_name and state.first_name:
+                state.step = "awaiting_phone"
+                return "И номер"
         state.step = "awaiting_full_name"
         return CONFIRMATION_MESSAGE
 

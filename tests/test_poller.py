@@ -1,4 +1,14 @@
 import pytest
+from datetime import date
+
+
+@pytest.fixture(autouse=True)
+def fixed_calendar(monkeypatch):
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 7, 20)
+    monkeypatch.setattr("avito_bot.candidate.date", FixedDate)
 
 import poller as poller_module
 

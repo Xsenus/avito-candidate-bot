@@ -19,9 +19,11 @@ if PROJECT_ROOT not in sys.path:
 from avito_bot.alerts import emit_alert
 from avito_bot.avito_client import AvitoClient
 from avito_bot.candidate import (
+    InternshipDateError,
     normalize_phone,
     resolve_internship_date,
     split_full_name,
+    validate_internship_date,
 )
 from avito_bot.conversation import (
     CALL_HANDOFF_MESSAGE,
@@ -987,6 +989,14 @@ def complete_pending_application(
         )
         return False
 
+    if state.application_status != "submitted":
+        try:
+            validate_internship_date(state.internship_date or "")
+        except InternshipDateError as exc:
+            require_date_correction(store, chat_id, state)
+            send_bot_message(client, store, chat_id, str(exc))
+            return False
+
     if not state.processing_notice_sent:
         send_bot_message(
             client,
@@ -1274,6 +1284,42 @@ def return_to_collection(
     state.submission_attempts = 0
     state.alert_sent = False
     store.save(chat_id, state)
+
+
+def require_date_correction(
+    store: SQLiteStateStore, chat_id: str, state: ConversationState
+) -> None:
+    """Keep collected identity/warehouse fields; never guess a replacement year."""
+    state.notes["date_correction_required"] = "true"
+    state.internship_date = None
+    state.date_time = None
+    state.processing_notice_sent = False
+    stop_reminders(state, permanently=True)
+    return_to_collection(store, chat_id, state, ["internship_date"])
+
+
+def recover_invalid_date_failures(store: SQLiteStateStore) -> int:
+    """Reopen only confirmed pre-submission date failures, without sending messages.
+
+    Submitted/uncertain/manual records must not be replayed. Old candidates are
+    asked for a new date only when they return, rather than sent a bulk broadcast.
+    """
+    recovered = 0
+    for chat_id, state in store.all_conversations():
+        if state.application_status not in {
+            "pending", "submission_retry_exhausted", "configuration_error"
+        } or state.manual_takeover_at:
+            continue
+        if "Дата стажировки должна быть в пределах ближайших 24 месяцев" not in (
+            state.last_error or ""
+        ):
+            continue
+        try:
+            validate_internship_date(state.internship_date or "")
+        except InternshipDateError:
+            require_date_correction(store, chat_id, state)
+            recovered += 1
+    return recovered
 
 
 def reconcile_incomplete_applications(
@@ -1808,6 +1854,9 @@ def main() -> None:
             f"WARNING: quarantined {interrupted} interrupted form submission(s); "
             "manual verification is required"
         )
+    date_recovered = recover_invalid_date_failures(store)
+    if date_recovered:
+        print(f"Date correction required for {date_recovered} pre-submission record(s)")
     workflow = CandidateWorkflow.from_env(YandexFormSubmitter.from_env())
     regional_source = GoogleSheetRegionalLocationSource(
         os.getenv(

@@ -4,6 +4,7 @@ import os
 from typing import Callable, Protocol
 
 from .conversation import ConversationState
+from .candidate import validate_internship_date
 from .invitations import GoogleSheetInvitationSource
 from .service_centers import (
     ServiceCenterSelection,
@@ -71,6 +72,9 @@ class CandidateWorkflow:
             raise RuntimeError(
                 f"Заявка не готова к отправке: {state.application_status}"
             )
+
+        if state.application_status != "submitted":
+            validate_internship_date(state.internship_date or "")
 
         catalog = self.invitation_source.load()
         if state.service_center and state.warehouse_selection_source in {
